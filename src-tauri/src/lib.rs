@@ -3,6 +3,7 @@ mod win_discord;
 mod win_focus;
 mod win_media;
 mod win_shell;
+mod win_updater;
 mod win_window;
 
 use config::{
@@ -16,7 +17,7 @@ use std::thread;
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use win_discord::{DiscordBridge, DiscordCommand, DiscordState};
 use win_focus::RunningStatus;
 use win_media::{AudioDeviceInfo, NowPlayingInfo, SystemStats, VolumeState};
@@ -199,6 +200,22 @@ fn authorize_discord(
 #[tauri::command]
 fn disconnect_discord(discord: State<'_, DiscordBridge>) -> Result<(), String> {
     discord.send(DiscordCommand::Disconnect)
+}
+
+#[tauri::command]
+async fn check_update() -> Result<win_updater::UpdateInfo, String> {
+    tauri::async_runtime::spawn_blocking(win_updater::check_for_update)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn apply_update(app: AppHandle, download_url: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        win_updater::download_and_apply_update(&app, &download_url)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -479,7 +496,9 @@ pub fn run() {
             set_autostart_cmd,
             open_data_folder,
             enable_portable_mode,
-            import_launchers_json
+            import_launchers_json,
+            check_update,
+            apply_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running TouchDeck");

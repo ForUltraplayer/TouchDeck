@@ -25,6 +25,7 @@ import type {
   NowPlayingInfo,
   RunningStatus,
   SystemStats,
+  UpdateInfo,
   VolumeState,
 } from "./types";
 
@@ -67,6 +68,7 @@ export const App: React.FC = () => {
   const [nowPlaying, setNowPlaying] = useState<NowPlayingInfo | null>(null);
   const [systemStats, setSystemStats] = useState<SystemStats | null>(null);
   const [runningStatus, setRunningStatus] = useState<RunningStatus | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [clockText, setClockText] = useState(formatClock);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -110,6 +112,23 @@ export const App: React.FC = () => {
     reloadConfig().catch((e) => showToast(`설정 로드 오류: ${String(e)}`));
     api.getDiscordState().then(setDiscordState).catch(() => {});
   }, [reloadConfig, showToast]);
+
+  // Auto-check GitHub releases once on startup
+  const checkedUpdateRef = useRef(false);
+  useEffect(() => {
+    if (!config || checkedUpdateRef.current) return;
+    checkedUpdateRef.current = true;
+    if (config.autoCheckUpdate === false) return;
+    const timer = setTimeout(() => {
+      api
+        .checkUpdate()
+        .then((info) => {
+          setUpdateInfo(info);
+        })
+        .catch(() => {});
+    }, 3500);
+    return () => clearTimeout(timer);
+  }, [config]);
 
   // Listen tray and Discord push events
   useEffect(() => {
@@ -876,6 +895,16 @@ export const App: React.FC = () => {
         </div>
 
         <div className="header-actions">
+          {updateInfo?.hasUpdate && (
+            <button
+              type="button"
+              className="update-pill"
+              onClick={() => setSettingsOpen(true)}
+              title={`새 버전 v${updateInfo.latestVersion} 업데이트 가능`}
+            >
+              v{updateInfo.latestVersion} 업데이트
+            </button>
+          )}
           <button
             type="button"
             className={`hdr-btn ${dockOpen ? "hdr-btn-active" : ""}`}
@@ -1076,6 +1105,8 @@ export const App: React.FC = () => {
           config={config}
           currentPageIndex={pageIndex}
           discordState={discordState}
+          updateInfo={updateInfo}
+          onUpdateInfo={setUpdateInfo}
           onChange={persistConfig}
           onSwitchPage={setPageIndex}
           onReloadFromDisk={reloadConfig}

@@ -133,6 +133,16 @@ export interface DeckConfig {
   pages: DeckPage[];
   vault?: ButtonItem[];
   discord?: DiscordConfig;
+  autoCheckUpdate?: boolean;
+}
+
+export interface UpdateInfo {
+  currentVersion: string;
+  latestVersion: string;
+  hasUpdate: boolean;
+  releaseUrl: string;
+  downloadUrl: string | null;
+  notes: string;
 }
 
 export interface EnvInfo {

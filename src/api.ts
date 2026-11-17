@@ -9,6 +9,7 @@ import type {
   ResolvedDrop,
   RunningStatus,
   SystemStats,
+  UpdateInfo,
   VolumeState,
 } from "./types";
 
@@ -43,6 +44,8 @@ export const api = {
   openDataFolder: () => invoke<void>("open_data_folder"),
   enablePortableMode: () => invoke<string>("enable_portable_mode"),
   importLaunchersJson: (path: string) => invoke<number>("import_launchers_json", { path }),
+  checkUpdate: () => invoke<UpdateInfo>("check_update"),
+  applyUpdate: (downloadUrl: string) => invoke<void>("apply_update", { downloadUrl }),
 };
 
 export function assetUrl(absPath: string | undefined | null): string | null {

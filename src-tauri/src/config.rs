@@ -175,6 +175,8 @@ pub struct DeckConfig {
     pub vault: Vec<ButtonItem>,
     #[serde(default)]
     pub discord: DiscordConfig,
+    #[serde(default = "default_true")]
+    pub auto_check_update: bool,
 }
 
 impl Default for DeckConfig {
@@ -412,6 +414,7 @@ impl Default for DeckConfig {
             ],
             vault: Vec::new(),
             discord: DiscordConfig::default(),
+            auto_check_update: true,
         }
     }
 }

@@ -1,13 +1,15 @@
 import React, { useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Download, FolderOpen, Image as ImageIcon, Plus, Trash2, X } from "lucide-react";
+import { Download, FolderOpen, Image as ImageIcon, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { api } from "../api";
-import type { DeckConfig, DiscordState, EnvInfo } from "../types";
+import type { DeckConfig, DiscordState, EnvInfo, UpdateInfo } from "../types";
 
 interface Props {
   config: DeckConfig;
   currentPageIndex: number;
   discordState: DiscordState | null;
+  updateInfo: UpdateInfo | null;
+  onUpdateInfo: (info: UpdateInfo | null) => void;
   onChange: (next: DeckConfig) => void;
   onSwitchPage: (idx: number) => void;
   onReloadFromDisk: () => void;
@@ -18,6 +20,8 @@ export const SettingsDrawer: React.FC<Props> = ({
   config,
   currentPageIndex,
   discordState,
+  updateInfo,
+  onUpdateInfo,
   onChange,
   onSwitchPage,
   onReloadFromDisk,
@@ -25,6 +29,8 @@ export const SettingsDrawer: React.FC<Props> = ({
 }) => {
   const [envInfo, setEnvInfo] = useState<EnvInfo | null>(null);
   const [statusMsg, setStatusMsg] = useState<string>("");
+  const [updating, setUpdating] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [dcClientId, setDcClientId] = useState(config.discord?.clientId ?? "");
   const [dcClientSecret, setDcClientSecret] = useState(config.discord?.clientSecret ?? "");
 
@@ -526,6 +532,82 @@ export const SettingsDrawer: React.FC<Props> = ({
               저장 경로: {envInfo.dataDir} {envInfo.isPortable ? "(포터블)" : ""}
             </div>
           )}
+
+          <div className="divider" />
+          <div className="section-title">GitHub 저장소 자동 업데이트</div>
+          <div className="inline-group" style={{ justifyContent: "space-between", flexWrap: "wrap" }}>
+            <label className="check-pill">
+              <input
+                type="checkbox"
+                checked={config.autoCheckUpdate !== false}
+                onChange={(e) => onChange({ ...config, autoCheckUpdate: e.target.checked })}
+              />
+              시작 시 새 릴리즈 자동 확인
+            </label>
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={checkingUpdate || updating}
+              onClick={async () => {
+                setCheckingUpdate(true);
+                try {
+                  const info = await api.checkUpdate();
+                  onUpdateInfo(info);
+                  setStatusMsg(
+                    info.hasUpdate
+                      ? `새 버전 v${info.latestVersion} 사용 가능 (현재 v${info.currentVersion})`
+                      : `최신 버전입니다 (v${info.currentVersion})`
+                  );
+                } catch (e) {
+                  setStatusMsg(`업데이트 확인 실패: ${String(e)}`);
+                } finally {
+                  setCheckingUpdate(false);
+                }
+              }}
+            >
+              <RefreshCw size={13} /> {checkingUpdate ? "확인 중..." : "지금 확인"}
+            </button>
+          </div>
+          {updateInfo?.hasUpdate && (
+            <div className="update-box">
+              <div className="inline-group" style={{ justifyContent: "space-between" }}>
+                <strong>
+                  새 릴리즈: v{updateInfo.latestVersion} (현재 v{updateInfo.currentVersion})
+                </strong>
+                {updateInfo.downloadUrl ? (
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    disabled={updating}
+                    onClick={async () => {
+                      setUpdating(true);
+                      setStatusMsg("새 버전 다운로드 및 교체 중... 잠시 후 자동 재시작됩니다.");
+                      try {
+                        await api.applyUpdate(updateInfo.downloadUrl!);
+                      } catch (e) {
+                        setUpdating(false);
+                        setStatusMsg(`업데이트 실패: ${String(e)}`);
+                      }
+                    }}
+                  >
+                    {updating ? "적용 중..." : "자동 업데이트 & 재시작"}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() =>
+                      api.executeAction({ type: "url", url: updateInfo.releaseUrl }).catch(() => {})
+                    }
+                  >
+                    릴리즈 페이지 열기
+                  </button>
+                )}
+              </div>
+              {updateInfo.notes && <div className="hint-text">{updateInfo.notes.slice(0, 220)}</div>}
+            </div>
+          )}
+
           {statusMsg && <div className="status-banner">{statusMsg}</div>}
         </div>
 

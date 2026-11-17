@@ -1,6 +1,6 @@
 [package]
 name = "touchdeck"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lightweight Windows touchscreen launcher & Stream Deck alternative"
 authors = ["ForUltraplayer"]
 edition = "2021"
