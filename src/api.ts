@@ -33,7 +33,8 @@ export const api = {
   getVolumeState: () => invoke<VolumeState>("get_volume_state"),
   listAudioDevices: () => invoke<AudioDeviceInfo[]>("list_audio_devices"),
   getNowPlaying: () => invoke<NowPlayingInfo | null>("get_now_playing"),
-  getSystemStats: () => invoke<SystemStats>("get_system_stats"),
+  getSystemStats: (includeTemp?: boolean) =>
+    invoke<SystemStats>("get_system_stats", { includeTemp: includeTemp ?? false }),
   getRunningStatus: (procNames: string[]) =>
     invoke<RunningStatus>("get_running_status", { procNames }),
   setNoActivate: (enabled: boolean) => invoke<void>("set_no_activate", { enabled }),

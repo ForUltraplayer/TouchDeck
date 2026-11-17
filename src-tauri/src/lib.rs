@@ -1,6 +1,7 @@
 mod config;
 mod win_discord;
 mod win_focus;
+mod win_hw;
 mod win_media;
 mod win_shell;
 mod win_updater;
@@ -20,7 +21,8 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, State};
 use win_discord::{DiscordBridge, DiscordCommand, DiscordState};
 use win_focus::RunningStatus;
-use win_media::{AudioDeviceInfo, NowPlayingInfo, SystemStats, VolumeState};
+use win_hw::SystemStats;
+use win_media::{AudioDeviceInfo, NowPlayingInfo, VolumeState};
 use win_shell::ResolvedDrop;
 
 #[derive(Serialize)]
@@ -234,8 +236,11 @@ fn get_now_playing() -> Option<NowPlayingInfo> {
 }
 
 #[tauri::command]
-fn get_system_stats() -> SystemStats {
-    win_media::get_system_stats()
+async fn get_system_stats(include_temp: Option<bool>) -> Result<SystemStats, String> {
+    let want_temp = include_temp.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || win_hw::get_system_stats(want_temp))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

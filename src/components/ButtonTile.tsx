@@ -292,18 +292,84 @@ export const ButtonTile: React.FC<Props> = ({
               <div className="widget-sub">{clockText.date}</div>
             </>
           )}
-          {item.action.kind === "sys_stats" && (
-            <>
-              <div className="widget-stat-row">
-                <span className="widget-k">CPU</span>
-                <span className="widget-v">{systemStats ? `${systemStats.cpuPercent}%` : "--"}</span>
+          {item.action.kind === "sys_stats" && (() => {
+            const metrics =
+              item.action.metrics && item.action.metrics.length > 0
+                ? item.action.metrics
+                : ["cpu_pct", "ram_pct"];
+            const tempColor = (t: number | null | undefined) =>
+              t === null || t === undefined
+                ? "#94A3B8"
+                : t >= 80
+                ? "#F87171"
+                : t >= 65
+                ? "#FBBF24"
+                : "#38BDF8";
+
+            const rows = metrics.slice(0, 4).map((m) => {
+              switch (m) {
+                case "cpu_pct":
+                  return { k: "CPU", v: systemStats ? `${systemStats.cpuPercent}%` : "--", c: "#34D399" };
+                case "cpu_clk":
+                  return {
+                    k: "C.CLK",
+                    v:
+                      systemStats?.cpuClockMhz != null
+                        ? `${(systemStats.cpuClockMhz / 1000).toFixed(2)}G`
+                        : "--",
+                    c: "#60A5FA",
+                  };
+                case "cpu_temp":
+                  return {
+                    k: "C.TMP",
+                    v: systemStats?.cpuTempC != null ? `${systemStats.cpuTempC}°C` : "--",
+                    c: tempColor(systemStats?.cpuTempC),
+                  };
+                case "ram_pct":
+                  return { k: "RAM", v: systemStats ? `${systemStats.memPercent}%` : "--", c: "#34D399" };
+                case "gpu_pct":
+                  return {
+                    k: "GPU",
+                    v: systemStats?.gpuPercent != null ? `${systemStats.gpuPercent}%` : "--",
+                    c: "#A78BFA",
+                  };
+                case "gpu_temp":
+                  return {
+                    k: "G.TMP",
+                    v: systemStats?.gpuTempC != null ? `${systemStats.gpuTempC}°C` : "--",
+                    c: tempColor(systemStats?.gpuTempC),
+                  };
+                case "gpu_clk":
+                  return {
+                    k: "G.CLK",
+                    v: systemStats?.gpuClockMhz != null ? `${systemStats.gpuClockMhz}M` : "--",
+                    c: "#F472B6",
+                  };
+                case "vram_pct":
+                  return {
+                    k: "VRAM",
+                    v: systemStats?.vramPercent != null ? `${systemStats.vramPercent}%` : "--",
+                    c: "#A78BFA",
+                  };
+                default:
+                  return { k: m, v: "--", c: "#94A3B8" };
+              }
+            });
+
+            const dense = rows.length >= 3;
+            return (
+              <div className={`widget-stats-list ${dense ? "widget-stats-dense" : ""}`}>
+                {rows.map((r, i) => (
+                  <div key={i} className="widget-stat-row">
+                    <span className="widget-k">{r.k}</span>
+                    <span className="widget-v" style={{ color: r.c }}>
+                      {r.v}
+                    </span>
+                  </div>
+                ))}
               </div>
-              <div className="widget-stat-row">
-                <span className="widget-k">RAM</span>
-                <span className="widget-v">{systemStats ? `${systemStats.memPercent}%` : "--"}</span>
-              </div>
-            </>
-          )}
+            );
+          })()}
           {item.action.kind === "now_playing" && (
             <>
               <Music size={Math.round(cellSize * 0.22)} color={nowPlaying?.playing ? "#34D399" : "#94A3B8"} />

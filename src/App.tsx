@@ -165,6 +165,7 @@ export const App: React.FC = () => {
       const procs: string[] = [];
       let needMedia = false;
       let needStats = false;
+      let needTemp = false;
       let needVol = false;
 
       for (const b of items) {
@@ -178,14 +179,17 @@ export const App: React.FC = () => {
           needMedia = true;
         } else if (b.action.type === "widget") {
           if (b.action.kind === "now_playing") needMedia = true;
-          if (b.action.kind === "sys_stats") needStats = true;
+          if (b.action.kind === "sys_stats") {
+            needStats = true;
+            if (b.action.metrics?.includes("cpu_temp")) needTemp = true;
+          }
         }
       }
 
       if (needVol) api.getVolumeState().then(setVolumeState).catch(() => {});
       if (procs.length > 0) api.getRunningStatus(procs).then(setRunningStatus).catch(() => {});
       if (needMedia) api.getNowPlaying().then(setNowPlaying).catch(() => {});
-      if (needStats) api.getSystemStats().then(setSystemStats).catch(() => {});
+      if (needStats) api.getSystemStats(needTemp).then(setSystemStats).catch(() => {});
       setClockText(formatClock());
     };
 

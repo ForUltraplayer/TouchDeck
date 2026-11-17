@@ -126,6 +126,8 @@ pub enum ButtonAction {
     },
     Widget {
         kind: String, // "clock" | "sys_stats" | "now_playing"
+        #[serde(default)]
+        metrics: Vec<String>,
     },
 }
 
@@ -347,6 +349,7 @@ impl Default for DeckConfig {
                 accent_color: None,
                 action: ButtonAction::Widget {
                     kind: "sys_stats".into(),
+                    metrics: vec!["cpu_pct".into(), "ram_pct".into()],
                 },
             },
         );
@@ -365,6 +368,7 @@ impl Default for DeckConfig {
                 accent_color: None,
                 action: ButtonAction::Widget {
                     kind: "clock".into(),
+                    metrics: Vec::new(),
                 },
             },
         );

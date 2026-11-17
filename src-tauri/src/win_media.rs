@@ -1,12 +1,10 @@
 use serde::Serialize;
-use std::sync::Mutex;
 use windows::core::{Interface, GUID, HRESULT, PCWSTR};
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSessionManager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus,
 };
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-use windows::Win32::Foundation::FILETIME;
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{
     eCapture, eCommunications, eConsole, eMultimedia, eRender, IMMDeviceEnumerator,
@@ -17,8 +15,6 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
     COINIT_APARTMENTTHREADED, STGM_READ,
 };
-use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-use windows::Win32::System::Threading::GetSystemTimes;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END,
@@ -50,13 +46,6 @@ pub struct NowPlayingInfo {
     pub title: String,
     pub artist: String,
     pub playing: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SystemStats {
-    pub cpu_percent: u8,
-    pub mem_percent: u8,
 }
 
 struct ComGuard;
@@ -315,57 +304,6 @@ pub fn get_now_playing() -> Option<NowPlayingInfo> {
         artist,
         playing,
     })
-}
-
-static PREV_CPU: Mutex<Option<(u64, u64, u64)>> = Mutex::new(None);
-
-fn ft_to_u64(ft: FILETIME) -> u64 {
-    ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64)
-}
-
-pub fn get_system_stats() -> SystemStats {
-    let mut cpu_percent = 0u8;
-    unsafe {
-        let mut idle = FILETIME::default();
-        let mut kernel = FILETIME::default();
-        let mut user = FILETIME::default();
-        if GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)).is_ok() {
-            let i = ft_to_u64(idle);
-            let k = ft_to_u64(kernel);
-            let u = ft_to_u64(user);
-            if let Ok(mut guard) = PREV_CPU.lock() {
-                if let Some((pi, pk, pu)) = *guard {
-                    let di = i.saturating_sub(pi);
-                    let dk = k.saturating_sub(pk);
-                    let du = u.saturating_sub(pu);
-                    let total = dk + du;
-                    if total > 0 {
-                        let busy = total.saturating_sub(di);
-                        cpu_percent = ((busy as f64 / total as f64) * 100.0)
-                            .round()
-                            .clamp(0.0, 100.0) as u8;
-                    }
-                }
-                *guard = Some((i, k, u));
-            }
-        }
-    }
-
-    let mut mem_percent = 0u8;
-    unsafe {
-        let mut ms = MEMORYSTATUSEX {
-            dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
-            ..Default::default()
-        };
-        if GlobalMemoryStatusEx(&mut ms).is_ok() {
-            mem_percent = ms.dwMemoryLoad.min(100) as u8;
-        }
-    }
-
-    SystemStats {
-        cpu_percent,
-        mem_percent,
-    }
 }
 
 fn tap_vk(vk: VIRTUAL_KEY, extended: bool) {

@@ -87,6 +87,7 @@ export type ButtonAction =
   | {
       type: "widget";
       kind: "clock" | "sys_stats" | "now_playing";
+      metrics?: string[];
     };
 
 export interface DiscordConfig {
@@ -172,6 +173,13 @@ export interface NowPlayingInfo {
 export interface SystemStats {
   cpuPercent: number;
   memPercent: number;
+  cpuClockMhz: number | null;
+  cpuTempC: number | null;
+  gpuPercent: number | null;
+  gpuTempC: number | null;
+  gpuClockMhz: number | null;
+  vramPercent: number | null;
+  gpuName: string | null;
 }
 
 export interface RunningStatus {

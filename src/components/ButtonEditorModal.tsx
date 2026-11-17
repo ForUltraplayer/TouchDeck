@@ -167,7 +167,10 @@ export const ButtonEditorModal: React.FC<Props> = ({
         setItem({ ...item, action: { type: "discord", command: "mute" } });
         break;
       case "widget":
-        setItem({ ...item, action: { type: "widget", kind: "clock" } });
+        setItem({
+          ...item,
+          action: { type: "widget", kind: "clock", metrics: ["cpu_pct", "ram_pct"] },
+        });
         break;
     }
   };
@@ -752,25 +755,89 @@ export const ButtonEditorModal: React.FC<Props> = ({
           )}
 
           {item.action.type === "widget" && (
-            <div className="field-row">
-              <label>정보 타일 종류</label>
-              <select
-                value={item.action.kind}
-                onChange={(e) =>
-                  setItem({
-                    ...item,
-                    action: {
-                      type: "widget",
-                      kind: e.target.value as "clock" | "sys_stats" | "now_playing",
-                    },
-                  })
-                }
-              >
-                <option value="clock">시계 (시간 / 날짜)</option>
-                <option value="sys_stats">시스템 리소스 (CPU / RAM)</option>
-                <option value="now_playing">현재 재생 중인 곡</option>
-              </select>
-            </div>
+            <>
+              <div className="field-row">
+                <label>정보 타일 종류</label>
+                <select
+                  value={item.action.kind}
+                  onChange={(e) => {
+                    const nextKind = e.target.value as "clock" | "sys_stats" | "now_playing";
+                    const curMetrics = (item.action as Extract<ButtonAction, { type: "widget" }>).metrics;
+                    setItem({
+                      ...item,
+                      action: {
+                        type: "widget",
+                        kind: nextKind,
+                        metrics:
+                          nextKind === "sys_stats"
+                            ? curMetrics && curMetrics.length > 0
+                              ? curMetrics
+                              : ["cpu_pct", "ram_pct"]
+                            : curMetrics,
+                      },
+                    });
+                  }}
+                >
+                  <option value="clock">시계 (시간 / 날짜)</option>
+                  <option value="sys_stats">하드웨어 모니터 (CPU / GPU / 온도 / 클럭 / RAM)</option>
+                  <option value="now_playing">현재 재생 중인 곡</option>
+                </select>
+              </div>
+              {item.action.kind === "sys_stats" && (() => {
+                const selected =
+                  item.action.metrics && item.action.metrics.length > 0
+                    ? item.action.metrics
+                    : ["cpu_pct", "ram_pct"];
+                const opts: [string, string][] = [
+                  ["cpu_pct", "CPU 사용률 (%)"],
+                  ["cpu_clk", "CPU 클럭 (GHz)"],
+                  ["cpu_temp", "CPU 온도 (°C)"],
+                  ["ram_pct", "RAM 사용률 (%)"],
+                  ["gpu_pct", "GPU 사용률 (%)"],
+                  ["gpu_temp", "GPU 온도 (°C)"],
+                  ["gpu_clk", "GPU 클럭 (MHz)"],
+                  ["vram_pct", "VRAM 사용률 (%)"],
+                ];
+                return (
+                  <div className="field-row">
+                    <label>표시할 항목 (최대 4개)</label>
+                    <div className="metric-grid">
+                      {opts.map(([key, label]) => {
+                        const checked = selected.includes(key);
+                        return (
+                          <label key={key} className="check-pill">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              disabled={!checked && selected.length >= 4}
+                              onChange={(e) => {
+                                const next = e.target.checked
+                                  ? [...selected, key]
+                                  : selected.filter((k) => k !== key);
+                                setItem({
+                                  ...item,
+                                  action: {
+                                    type: "widget",
+                                    kind: "sys_stats",
+                                    metrics: next.length > 0 ? next : ["cpu_pct"],
+                                  },
+                                });
+                              }}
+                            />
+                            {label}
+                          </label>
+                        );
+                      })}
+                    </div>
+                    {selected.includes("cpu_temp") && (
+                      <div className="hint-text">
+                        * CPU 온도는 LibreHardwareMonitor / OpenHardwareMonitor 실행 중이거나 ACPI 지원 보드에서 표시됩니다.
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </>
           )}
 
           <div className="divider" />

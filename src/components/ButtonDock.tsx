@@ -209,7 +209,24 @@ export const PRESET_BUTTONS: PresetDef[] = [
       bgColor: null,
       bgOpacity: null,
       iconPath: null,
-      action: { type: "widget", kind: "sys_stats" },
+      action: { type: "widget", kind: "sys_stats", metrics: ["cpu_pct", "cpu_clk", "ram_pct"] },
+    },
+  },
+  {
+    category: "위젯 & 매크로",
+    item: {
+      label: "GPU 모니터",
+      showLabel: true,
+      fontSize: 13,
+      textColor: "#FFFFFF",
+      bgColor: null,
+      bgOpacity: null,
+      iconPath: null,
+      action: {
+        type: "widget",
+        kind: "sys_stats",
+        metrics: ["gpu_pct", "gpu_temp", "gpu_clk", "vram_pct"],
+      },
     },
   },
   {

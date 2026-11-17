@@ -399,8 +399,31 @@ body,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  width: 82%;
+  width: 86%;
   font-size: 12px;
+}
+
+.widget-stats-list {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  gap: 4px;
+}
+
+.widget-stats-dense {
+  gap: 2px;
+}
+
+.widget-stats-dense .widget-stat-row {
+  font-size: 10.5px;
+  width: 90%;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
 }
 
 .widget-k {
