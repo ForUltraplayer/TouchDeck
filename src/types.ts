@@ -26,6 +26,13 @@ export interface ThemeConfig {
   defaultButtonColor: string;
   defaultButtonOpacity: number;
   buttonStyle?: "solid" | "glass" | "transparent";
+  autoFontSize?: boolean;
+  iconRounded?: boolean;
+}
+
+export interface MultiStep {
+  action: ButtonAction;
+  delayMs: number;
 }
 
 export type ButtonAction =
@@ -37,6 +44,7 @@ export type ButtonAction =
       procName?: string;
       classHint?: string;
       titleHint?: string;
+      toggleMinimize?: boolean;
     }
   | {
       type: "folder";
@@ -54,6 +62,11 @@ export type ButtonAction =
       type: "volume";
       command: "up" | "down" | "mute";
       step: number;
+      target?: "speaker" | "mic";
+    }
+  | {
+      type: "audio_device";
+      deviceId?: string | null;
     }
   | {
       type: "hotkey";
@@ -62,6 +75,14 @@ export type ButtonAction =
   | {
       type: "page";
       pageIndex: number;
+    }
+  | {
+      type: "multi";
+      steps: MultiStep[];
+    }
+  | {
+      type: "widget";
+      kind: "clock" | "sys_stats" | "now_playing";
     };
 
 export interface ButtonItem {
@@ -73,6 +94,8 @@ export interface ButtonItem {
   bgColor: string | null;
   bgOpacity: number | null;
   iconPath: string | null;
+  badge?: string | null;
+  accentColor?: string | null;
   action: ButtonAction;
 }
 
@@ -99,6 +122,29 @@ export interface EnvInfo {
 export interface VolumeState {
   level: number;
   muted: boolean;
+  micMuted: boolean;
+}
+
+export interface AudioDeviceInfo {
+  id: string;
+  name: string;
+  isDefault: boolean;
+}
+
+export interface NowPlayingInfo {
+  title: string;
+  artist: string;
+  playing: boolean;
+}
+
+export interface SystemStats {
+  cpuPercent: number;
+  memPercent: number;
+}
+
+export interface RunningStatus {
+  running: string[];
+  foregroundProc: string;
 }
 
 export interface ResolvedDrop {

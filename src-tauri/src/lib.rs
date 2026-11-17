@@ -11,10 +11,13 @@ use config::{
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
-use win_media::VolumeState;
+use win_focus::RunningStatus;
+use win_media::{AudioDeviceInfo, NowPlayingInfo, SystemStats, VolumeState};
 use win_shell::ResolvedDrop;
 
 #[derive(Serialize)]
@@ -29,6 +32,7 @@ struct EnvInfo {
 #[serde(rename_all = "camelCase")]
 struct ExecuteResult {
     volume: Option<VolumeState>,
+    message: Option<String>,
 }
 
 #[tauri::command]
@@ -52,7 +56,18 @@ fn get_env_info() -> Result<EnvInfo, String> {
 
 #[tauri::command]
 fn inspect_drop(path: String) -> Result<ResolvedDrop, String> {
-    win_shell::inspect_dropped_path(&path)
+    let mut res = win_shell::inspect_dropped_path(&path)?;
+    if res.kind == "url" && !res.url.is_empty() {
+        if let Ok(fav) = win_shell::fetch_favicon_asset(&res.url) {
+            res.icon_path = Some(fav);
+        }
+    }
+    Ok(res)
+}
+
+#[tauri::command]
+fn fetch_favicon(url: String) -> Result<String, String> {
+    win_shell::fetch_favicon_asset(&url)
 }
 
 #[tauri::command]
@@ -70,32 +85,116 @@ fn extract_icon_for_path(path: String, is_folder: bool) -> Result<String, String
     win_shell::extract_icon_asset(&path, is_folder)
 }
 
-#[tauri::command]
-fn execute_action(action: ButtonAction) -> Result<ExecuteResult, String> {
-    match &action {
+fn execute_single_action(action: &ButtonAction) -> Result<ExecuteResult, String> {
+    match action {
         ButtonAction::App { .. } | ButtonAction::Folder { .. } | ButtonAction::Url { .. } => {
-            win_focus::execute_launch_action(&action)?;
-            Ok(ExecuteResult { volume: None })
+            win_focus::execute_launch_action(action)?;
+            Ok(ExecuteResult {
+                volume: None,
+                message: None,
+            })
         }
         ButtonAction::Media { command } => {
             win_media::send_media_command(command)?;
-            Ok(ExecuteResult { volume: None })
+            Ok(ExecuteResult {
+                volume: None,
+                message: None,
+            })
         }
-        ButtonAction::Volume { command, step } => {
-            let vol = win_media::adjust_volume(command, *step)?;
-            Ok(ExecuteResult { volume: Some(vol) })
+        ButtonAction::Volume {
+            command,
+            step,
+            target,
+        } => {
+            let vol = win_media::adjust_volume(command, *step, target)?;
+            Ok(ExecuteResult {
+                volume: Some(vol),
+                message: None,
+            })
+        }
+        ButtonAction::AudioDevice { device_id } => {
+            let name = win_media::switch_audio_device(device_id.as_deref())?;
+            Ok(ExecuteResult {
+                volume: win_media::get_volume_state().ok(),
+                message: Some(format!("출력 장치: {name}")),
+            })
         }
         ButtonAction::Hotkey { keys } => {
             win_media::send_hotkey(keys)?;
-            Ok(ExecuteResult { volume: None })
+            Ok(ExecuteResult {
+                volume: None,
+                message: None,
+            })
         }
-        ButtonAction::Page { .. } => Ok(ExecuteResult { volume: None }),
+        ButtonAction::Multi { steps } => {
+            let steps_owned = steps.clone();
+            thread::spawn(move || {
+                for step in steps_owned {
+                    let _ = execute_single_action(&step.action);
+                    if step.delay_ms > 0 {
+                        thread::sleep(Duration::from_millis(step.delay_ms as u64));
+                    }
+                }
+            });
+            Ok(ExecuteResult {
+                volume: None,
+                message: None,
+            })
+        }
+        ButtonAction::Page { .. } | ButtonAction::Widget { .. } => Ok(ExecuteResult {
+            volume: None,
+            message: None,
+        }),
     }
+}
+
+#[tauri::command]
+fn execute_action(action: ButtonAction) -> Result<ExecuteResult, String> {
+    execute_single_action(&action)
 }
 
 #[tauri::command]
 fn get_volume_state() -> Result<VolumeState, String> {
     win_media::get_volume_state()
+}
+
+#[tauri::command]
+fn list_audio_devices() -> Result<Vec<AudioDeviceInfo>, String> {
+    win_media::list_audio_devices()
+}
+
+#[tauri::command]
+fn get_now_playing() -> Option<NowPlayingInfo> {
+    win_media::get_now_playing()
+}
+
+#[tauri::command]
+fn get_system_stats() -> SystemStats {
+    win_media::get_system_stats()
+}
+
+#[tauri::command]
+fn get_running_status(proc_names: Vec<String>) -> RunningStatus {
+    win_focus::get_running_status(&proc_names)
+}
+
+#[tauri::command]
+fn set_no_activate(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    win_window::set_no_activate(hwnd.0 as isize, enabled);
+    Ok(())
+}
+
+#[tauri::command]
+fn clamp_window_pos(x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
+    win_window::clamp_window_position(x, y, w, h)
+}
+
+#[tauri::command]
+fn ensure_desktop_visible(window: tauri::WebviewWindow) -> Result<(), String> {
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    win_window::ensure_desktop_visible(hwnd.0 as isize);
+    Ok(())
 }
 
 #[tauri::command]
@@ -185,11 +284,13 @@ fn import_launchers_json(path: String) -> Result<usize, String> {
                 (ButtonAction::Folder { path: entry.folder }, icon)
             }
             "url" => {
-                let icon = win_shell::extract_icon_asset(
-                    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                    false,
-                )
-                .ok();
+                let icon = win_shell::fetch_favicon_asset(&entry.url).ok().or_else(|| {
+                    win_shell::extract_icon_asset(
+                        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                        false,
+                    )
+                    .ok()
+                });
                 (ButtonAction::Url { url: entry.url }, icon)
             }
             _ => {
@@ -202,6 +303,7 @@ fn import_launchers_json(path: String) -> Result<usize, String> {
                         proc_name: entry.proc,
                         class_hint: entry.class_hint,
                         title_hint: entry.title_hint,
+                        toggle_minimize: false,
                     },
                     icon,
                 )
@@ -219,6 +321,8 @@ fn import_launchers_json(path: String) -> Result<usize, String> {
                 bg_color: None,
                 bg_opacity: None,
                 icon_path,
+                badge: None,
+                accent_color: None,
                 action,
             },
         );
@@ -262,11 +366,12 @@ pub fn run() {
                     "show" => {
                         if let Some(w) = app.get_webview_window("main") {
                             let _ = w.show();
-                            let _ = w.set_focus();
+                            let _ = w.emit("tray-show", ());
                         }
                     }
                     "hide" => {
                         if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.emit("tray-hide", ());
                             let _ = w.hide();
                         }
                     }
@@ -291,7 +396,7 @@ pub fn run() {
                     {
                         if let Some(w) = tray.app_handle().get_webview_window("main") {
                             let _ = w.show();
-                            let _ = w.set_focus();
+                            let _ = w.emit("tray-show", ());
                         }
                     }
                 })
@@ -304,11 +409,19 @@ pub fn run() {
             save_config_cmd,
             get_env_info,
             inspect_drop,
+            fetch_favicon,
             import_image,
             resolve_asset,
             extract_icon_for_path,
             execute_action,
             get_volume_state,
+            list_audio_devices,
+            get_now_playing,
+            get_system_stats,
+            get_running_status,
+            set_no_activate,
+            clamp_window_pos,
+            ensure_desktop_visible,
             set_autostart_cmd,
             open_data_folder,
             enable_portable_mode,

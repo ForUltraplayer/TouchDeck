@@ -11,6 +11,11 @@ use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
     BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
 };
+use windows::Win32::Networking::WinHttp::{
+    WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable,
+    WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
+    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_OPEN_REQUEST_FLAGS,
+};
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_FLAGS_AND_ATTRIBUTES,
 };
@@ -328,6 +333,135 @@ pub fn extract_icon_asset(source_path: &str, is_folder: bool) -> Result<String, 
         img.save(&dest).map_err(|e| format!("save icon png: {e}"))?;
         Ok(rel_path)
     }
+}
+
+fn http_get_bytes(host: &str, port: u16, path_query: &str, https: bool) -> Result<Vec<u8>, String> {
+    unsafe {
+        let session = WinHttpOpen(
+            &HSTRING::from("TouchDeck/1.0"),
+            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+            None,
+            None,
+            0,
+        );
+        if session.is_null() {
+            return Err("WinHttpOpen failed".into());
+        }
+        struct HandleGuard(*mut core::ffi::c_void);
+        impl Drop for HandleGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    if !self.0.is_null() {
+                        let _ = WinHttpCloseHandle(self.0);
+                    }
+                }
+            }
+        }
+        let _s_guard = HandleGuard(session);
+        let _ = WinHttpSetTimeouts(session, 2500, 2500, 2500, 2500);
+
+        let conn = WinHttpConnect(session, &HSTRING::from(host), port, 0);
+        if conn.is_null() {
+            return Err("WinHttpConnect failed".into());
+        }
+        let _c_guard = HandleGuard(conn);
+
+        let flags = if https {
+            WINHTTP_FLAG_SECURE
+        } else {
+            WINHTTP_OPEN_REQUEST_FLAGS(0)
+        };
+        let req = WinHttpOpenRequest(
+            conn,
+            &HSTRING::from("GET"),
+            &HSTRING::from(path_query),
+            None,
+            None,
+            std::ptr::null(),
+            flags,
+        );
+        if req.is_null() {
+            return Err("WinHttpOpenRequest failed".into());
+        }
+        let _r_guard = HandleGuard(req);
+
+        WinHttpSendRequest(req, None, None, 0, 0, 0)
+            .map_err(|e| format!("WinHttpSendRequest: {e}"))?;
+        WinHttpReceiveResponse(req, std::ptr::null_mut())
+            .map_err(|e| format!("WinHttpReceiveResponse: {e}"))?;
+
+        let mut out = Vec::new();
+        loop {
+            let mut avail: u32 = 0;
+            WinHttpQueryDataAvailable(req, &mut avail)
+                .map_err(|e| format!("WinHttpQueryDataAvailable: {e}"))?;
+            if avail == 0 {
+                break;
+            }
+            let chunk_len = avail.min(65536) as usize;
+            let mut buf = vec![0u8; chunk_len];
+            let mut read: u32 = 0;
+            WinHttpReadData(req, buf.as_mut_ptr() as *mut _, chunk_len as u32, &mut read)
+                .map_err(|e| format!("WinHttpReadData: {e}"))?;
+            if read == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..read as usize]);
+            if out.len() > 524_288 {
+                break;
+            }
+        }
+        Ok(out)
+    }
+}
+
+pub fn fetch_favicon_asset(raw_url: &str) -> Result<String, String> {
+    let trimmed = raw_url.trim();
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    let authority = without_scheme.split('/').next().unwrap_or("");
+    let host = authority.split(':').next().unwrap_or("").trim();
+    if host.is_empty() {
+        return Err("유효한 도메인이 아닙니다.".into());
+    }
+
+    let data_dir = get_data_dir()?;
+    let mut hasher = DefaultHasher::new();
+    host.to_ascii_lowercase().hash(&mut hasher);
+    let rel_path = format!("assets/fav_{:016x}.png", hasher.finish());
+    let dest = data_dir.join(&rel_path);
+    if dest.exists() {
+        return Ok(rel_path);
+    }
+
+    let is_local_or_ip = host.eq_ignore_ascii_case("localhost")
+        || host.chars().all(|c| c.is_ascii_digit() || c == '.');
+
+    let bytes = if is_local_or_ip {
+        let port: u16 = authority
+            .split(':')
+            .nth(1)
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(if trimmed.starts_with("https://") { 443 } else { 80 });
+        http_get_bytes(host, port, "/favicon.ico", trimmed.starts_with("https://"))?
+    } else {
+        let q = format!("/s2/favicons?domain={host}&sz=128");
+        http_get_bytes("www.google.com", 443, &q, true)?
+    };
+
+    if bytes.is_empty() {
+        return Err("파비콘 응답이 비어 있습니다.".into());
+    }
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("이미지 디코드 실패: {e}"))?;
+    let resized = if img.width() < 64 {
+        img.resize_exact(128, 128, FilterType::Lanczos3)
+    } else {
+        img
+    };
+    resized.save(&dest).map_err(|e| format!("파비콘 저장 실패: {e}"))?;
+    Ok(rel_path)
 }
 
 fn clean_label_from_path(p: &Path) -> String {

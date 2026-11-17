@@ -1,5 +1,6 @@
 use crate::config::ButtonAction;
-use std::collections::HashSet;
+use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::Path;
@@ -26,8 +27,72 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
     SetForegroundWindow, SetWindowPos, ShowWindow, SwitchToThisWindow, ASFW_ANY, FLASHWINFO,
     FLASHW_STOP, GWL_EXSTYLE, GW_OWNER, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, WS_EX_TOOLWINDOW,
+    SWP_SHOWWINDOW, SW_HIDE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, WS_EX_TOOLWINDOW,
 };
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningStatus {
+    pub running: Vec<String>,
+    pub foreground_proc: String,
+}
+
+pub fn get_running_status(targets: &[String]) -> RunningStatus {
+    let mut pid_to_name: HashMap<u32, String> = HashMap::new();
+    let mut all_names: HashSet<String> = HashSet::new();
+
+    unsafe {
+        if let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            let mut entry = PROCESSENTRY32W::default();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            if Process32FirstW(snap, &mut entry).is_ok() {
+                loop {
+                    let len = entry
+                        .szExeFile
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    let raw = OsString::from_wide(&entry.szExeFile[..len])
+                        .to_string_lossy()
+                        .to_ascii_lowercase();
+                    let stem = raw.strip_suffix(".exe").unwrap_or(&raw).to_string();
+                    pid_to_name.insert(entry.th32ProcessID, stem.clone());
+                    all_names.insert(stem);
+                    if Process32NextW(snap, &mut entry).is_err() {
+                        break;
+                    }
+                }
+            }
+            let _ = windows::Win32::Foundation::CloseHandle(snap);
+        }
+    }
+
+    let mut running = Vec::new();
+    for t in targets {
+        let low = t.trim().to_ascii_lowercase();
+        let stem = low.strip_suffix(".exe").unwrap_or(&low);
+        if !stem.is_empty() && all_names.contains(stem) {
+            running.push(t.clone());
+        }
+    }
+
+    let mut fg_proc = String::new();
+    unsafe {
+        let fg = GetForegroundWindow();
+        if !fg.0.is_null() {
+            let mut fg_pid: u32 = 0;
+            GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+            if let Some(name) = pid_to_name.get(&fg_pid) {
+                fg_proc = name.clone();
+            }
+        }
+    }
+
+    RunningStatus {
+        running,
+        foreground_proc: fg_proc,
+    }
+}
 
 fn expand_env_vars(input: &str) -> String {
     let mut out = input.to_string();
@@ -558,6 +623,7 @@ pub fn execute_launch_action(action: &ButtonAction) -> Result<(), String> {
             proc_name,
             class_hint,
             title_hint,
+            toggle_minimize,
         } => {
             let resolved_exe = resolve_exe_with_fallback(exe);
             let resolved_wd = expand_env_vars(work_dir);
@@ -584,9 +650,15 @@ pub fn execute_launch_action(action: &ButtonAction) -> Result<(), String> {
 
             let wins = find_process_windows(&effective_proc);
             if let Some(hwnd) = pick_best_window(&wins, class_hint, title_hint) {
+                let do_toggle = *toggle_minimize;
                 let hwnd_raw = hwnd.0 as isize;
-                thread::spawn(move || {
-                    force_foreground(HWND(hwnd_raw as *mut _));
+                thread::spawn(move || unsafe {
+                    let target = HWND(hwnd_raw as *mut _);
+                    if do_toggle && GetForegroundWindow() == target && !IsIconic(target).as_bool() {
+                        let _ = ShowWindow(target, SW_MINIMIZE);
+                    } else {
+                        force_foreground(target);
+                    }
                 });
                 return Ok(());
             }

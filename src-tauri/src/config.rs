@@ -23,6 +23,14 @@ pub struct GridConfig {
     pub border_radius: u32,
 }
 
+fn default_button_style() -> String {
+    "solid".into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThemeConfig {
@@ -30,7 +38,7 @@ pub struct ThemeConfig {
     pub background_color: String,
     pub background_opacity: u8, // 0..=100
     pub gradient_end_color: String,
-    pub background_image: Option<String>, // relative to data dir, e.g. "assets/bg_xxx.png"
+    pub background_image: Option<String>,
     pub background_blur: u32,
     pub background_dim: u8, // 0..=100
     pub font_family: String,
@@ -38,10 +46,18 @@ pub struct ThemeConfig {
     pub default_button_opacity: u8,
     #[serde(default = "default_button_style")]
     pub button_style: String, // "solid" | "glass" | "transparent"
+    #[serde(default = "default_true")]
+    pub auto_font_size: bool,
+    #[serde(default = "default_true")]
+    pub icon_rounded: bool,
 }
 
-fn default_button_style() -> String {
-    "solid".into()
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultiStep {
+    pub action: Box<ButtonAction>,
+    #[serde(default)]
+    pub delay_ms: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +75,8 @@ pub enum ButtonAction {
         class_hint: String,
         #[serde(default, rename = "titleHint")]
         title_hint: String,
+        #[serde(default, rename = "toggleMinimize")]
+        toggle_minimize: bool,
     },
     Folder {
         path: String,
@@ -73,6 +91,12 @@ pub enum ButtonAction {
         command: String, // "up" | "down" | "mute"
         #[serde(default = "default_step")]
         step: u8,
+        #[serde(default = "default_speaker")]
+        target: String, // "speaker" | "mic"
+    },
+    AudioDevice {
+        #[serde(default, rename = "deviceId")]
+        device_id: Option<String>, // None = cycle output devices
     },
     Hotkey {
         keys: Vec<String>,
@@ -81,10 +105,20 @@ pub enum ButtonAction {
         #[serde(rename = "pageIndex")]
         page_index: usize,
     },
+    Multi {
+        steps: Vec<MultiStep>,
+    },
+    Widget {
+        kind: String, // "clock" | "sys_stats" | "now_playing"
+    },
 }
 
 fn default_step() -> u8 {
-    4
+    5
+}
+
+fn default_speaker() -> String {
+    "speaker".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,7 +131,11 @@ pub struct ButtonItem {
     pub text_color: String,
     pub bg_color: Option<String>,
     pub bg_opacity: Option<u8>,
-    pub icon_path: Option<String>, // relative to data dir e.g. "assets/icon_xxx.png"
+    pub icon_path: Option<String>,
+    #[serde(default)]
+    pub badge: Option<String>,
+    #[serde(default)]
+    pub accent_color: Option<String>,
     pub action: ButtonAction,
 }
 
@@ -133,9 +171,12 @@ impl Default for DeckConfig {
                 bg_color: None,
                 bg_opacity: None,
                 icon_path: None,
+                badge: None,
+                accent_color: None,
                 action: ButtonAction::Volume {
                     command: "down".into(),
                     step: 5,
+                    target: "speaker".into(),
                 },
             },
         );
@@ -150,9 +191,12 @@ impl Default for DeckConfig {
                 bg_color: None,
                 bg_opacity: None,
                 icon_path: None,
+                badge: None,
+                accent_color: None,
                 action: ButtonAction::Volume {
                     command: "mute".into(),
                     step: 0,
+                    target: "speaker".into(),
                 },
             },
         );
@@ -167,10 +211,49 @@ impl Default for DeckConfig {
                 bg_color: None,
                 bg_opacity: None,
                 icon_path: None,
+                badge: None,
+                accent_color: None,
                 action: ButtonAction::Volume {
                     command: "up".into(),
                     step: 5,
+                    target: "speaker".into(),
                 },
+            },
+        );
+        page2_slots.insert(
+            "3".to_string(),
+            ButtonItem {
+                id: "btn-mic-mute".into(),
+                label: "마이크".into(),
+                show_label: true,
+                font_size: 13,
+                text_color: "#FFFFFF".into(),
+                bg_color: None,
+                bg_opacity: None,
+                icon_path: None,
+                badge: None,
+                accent_color: None,
+                action: ButtonAction::Volume {
+                    command: "mute".into(),
+                    step: 0,
+                    target: "mic".into(),
+                },
+            },
+        );
+        page2_slots.insert(
+            "4".to_string(),
+            ButtonItem {
+                id: "btn-audio-dev".into(),
+                label: "출력 전환".into(),
+                show_label: true,
+                font_size: 13,
+                text_color: "#FFFFFF".into(),
+                bg_color: None,
+                bg_opacity: None,
+                icon_path: None,
+                badge: None,
+                accent_color: None,
+                action: ButtonAction::AudioDevice { device_id: None },
             },
         );
         page2_slots.insert(
@@ -184,6 +267,8 @@ impl Default for DeckConfig {
                 bg_color: None,
                 bg_opacity: None,
                 icon_path: None,
+                badge: None,
+                accent_color: None,
                 action: ButtonAction::Media {
                     command: "prev".into(),
                 },
@@ -200,6 +285,8 @@ impl Default for DeckConfig {
                 bg_color: None,
                 bg_opacity: None,
                 icon_path: None,
+                badge: None,
+                accent_color: None,
                 action: ButtonAction::Media {
                     command: "play_pause".into(),
                 },
@@ -216,8 +303,46 @@ impl Default for DeckConfig {
                 bg_color: None,
                 bg_opacity: None,
                 icon_path: None,
+                badge: None,
+                accent_color: None,
                 action: ButtonAction::Media {
                     command: "next".into(),
+                },
+            },
+        );
+        page2_slots.insert(
+            "8".to_string(),
+            ButtonItem {
+                id: "btn-widget-sys".into(),
+                label: "시스템".into(),
+                show_label: true,
+                font_size: 13,
+                text_color: "#FFFFFF".into(),
+                bg_color: None,
+                bg_opacity: None,
+                icon_path: None,
+                badge: None,
+                accent_color: None,
+                action: ButtonAction::Widget {
+                    kind: "sys_stats".into(),
+                },
+            },
+        );
+        page2_slots.insert(
+            "9".to_string(),
+            ButtonItem {
+                id: "btn-widget-clock".into(),
+                label: "시계".into(),
+                show_label: true,
+                font_size: 13,
+                text_color: "#FFFFFF".into(),
+                bg_color: None,
+                bg_opacity: None,
+                icon_path: None,
+                badge: None,
+                accent_color: None,
+                action: ButtonAction::Widget {
+                    kind: "clock".into(),
                 },
             },
         );
@@ -250,6 +375,8 @@ impl Default for DeckConfig {
                 default_button_color: "#32353D".into(),
                 default_button_opacity: 88,
                 button_style: "solid".into(),
+                auto_font_size: true,
+                icon_rounded: true,
             },
             pages: vec![
                 DeckPage {

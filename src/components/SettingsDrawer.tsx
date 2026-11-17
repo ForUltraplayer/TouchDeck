@@ -390,8 +390,24 @@ export const SettingsDrawer: React.FC<Props> = ({
           </div>
 
           <div className="divider" />
-          <div className="section-title">창 동작 & 이식성</div>
+          <div className="section-title">창 동작 & 외관 옵션</div>
           <div className="check-grid">
+            <label className="check-pill">
+              <input
+                type="checkbox"
+                checked={config.theme.autoFontSize !== false}
+                onChange={(e) => updateTheme({ autoFontSize: e.target.checked })}
+              />
+              칸 크기 비례 글자 크기
+            </label>
+            <label className="check-pill">
+              <input
+                type="checkbox"
+                checked={config.theme.iconRounded !== false}
+                onChange={(e) => updateTheme({ iconRounded: e.target.checked })}
+              />
+              아이콘 둥근 모서리
+            </label>
             <label className="check-pill">
               <input
                 type="checkbox"
@@ -399,6 +415,14 @@ export const SettingsDrawer: React.FC<Props> = ({
                 onChange={(e) => updateWindow({ alwaysOnTop: e.target.checked })}
               />
               항상 위에 고정
+            </label>
+            <label className="check-pill">
+              <input
+                type="checkbox"
+                checked={config.window.desktopLayer}
+                onChange={(e) => updateWindow({ desktopLayer: e.target.checked })}
+              />
+              바탕화면 보기(Win+D) 유지
             </label>
             <label className="check-pill">
               <input

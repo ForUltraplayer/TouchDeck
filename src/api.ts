@@ -1,19 +1,39 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import type { ButtonAction, DeckConfig, EnvInfo, ResolvedDrop, VolumeState } from "./types";
+import type {
+  AudioDeviceInfo,
+  ButtonAction,
+  DeckConfig,
+  EnvInfo,
+  NowPlayingInfo,
+  ResolvedDrop,
+  RunningStatus,
+  SystemStats,
+  VolumeState,
+} from "./types";
 
 export const api = {
   getConfig: () => invoke<DeckConfig>("get_config"),
   saveConfig: (config: DeckConfig) => invoke<void>("save_config_cmd", { config }),
   getEnvInfo: () => invoke<EnvInfo>("get_env_info"),
   inspectDrop: (path: string) => invoke<ResolvedDrop>("inspect_drop", { path }),
+  fetchFavicon: (url: string) => invoke<string>("fetch_favicon", { url }),
   importImage: (path: string, prefix: string) =>
     invoke<string>("import_image", { path, prefix }),
   resolveAsset: (relPath: string) => invoke<string>("resolve_asset", { relPath }),
   extractIconForPath: (path: string, isFolder: boolean) =>
     invoke<string>("extract_icon_for_path", { path, isFolder }),
   executeAction: (action: ButtonAction) =>
-    invoke<{ volume: VolumeState | null }>("execute_action", { action }),
+    invoke<{ volume: VolumeState | null; message: string | null }>("execute_action", { action }),
   getVolumeState: () => invoke<VolumeState>("get_volume_state"),
+  listAudioDevices: () => invoke<AudioDeviceInfo[]>("list_audio_devices"),
+  getNowPlaying: () => invoke<NowPlayingInfo | null>("get_now_playing"),
+  getSystemStats: () => invoke<SystemStats>("get_system_stats"),
+  getRunningStatus: (procNames: string[]) =>
+    invoke<RunningStatus>("get_running_status", { procNames }),
+  setNoActivate: (enabled: boolean) => invoke<void>("set_no_activate", { enabled }),
+  clampWindowPos: (x: number, y: number, w: number, h: number) =>
+    invoke<[number, number]>("clamp_window_pos", { x, y, w, h }),
+  ensureDesktopVisible: () => invoke<void>("ensure_desktop_visible"),
   setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart_cmd", { enabled }),
   openDataFolder: () => invoke<void>("open_data_folder"),
   enablePortableMode: () => invoke<string>("enable_portable_mode"),

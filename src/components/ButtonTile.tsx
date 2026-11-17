@@ -2,9 +2,16 @@ import React from "react";
 import {
   AppWindow,
   ArrowRightCircle,
+  Clock,
+  Cpu,
   Folder,
   Globe,
+  Headphones,
   Keyboard,
+  Layers,
+  Mic,
+  MicOff,
+  Music,
   Pause,
   Play,
   Plus,
@@ -16,7 +23,13 @@ import {
   VolumeX,
 } from "lucide-react";
 import { assetUrl, hexToRgba } from "../api";
-import type { ButtonItem, ThemeConfig, VolumeState } from "../types";
+import type {
+  ButtonItem,
+  NowPlayingInfo,
+  SystemStats,
+  ThemeConfig,
+  VolumeState,
+} from "../types";
 
 interface Props {
   slotIndex: number;
@@ -26,15 +39,26 @@ interface Props {
   cellSize: number;
   borderRadius: number;
   editMode: boolean;
+  locked: boolean;
   isDropHover: boolean;
   isDraggingSource: boolean;
+  isRunning: boolean;
+  isForeground: boolean;
   volumeState: VolumeState | null;
+  nowPlaying: NowPlayingInfo | null;
+  systemStats: SystemStats | null;
+  clockText: { time: string; date: string };
   onExecute: (item: ButtonItem) => void;
   onEdit: (slotIndex: number) => void;
   onStartSlotDrag: (slotIndex: number, e: React.PointerEvent) => void;
 }
 
-function renderFallbackIcon(item: ButtonItem, volumeState: VolumeState | null, size: number) {
+function renderFallbackIcon(
+  item: ButtonItem,
+  volumeState: VolumeState | null,
+  nowPlaying: NowPlayingInfo | null,
+  size: number
+) {
   const act = item.action;
   switch (act.type) {
     case "folder":
@@ -42,6 +66,13 @@ function renderFallbackIcon(item: ButtonItem, volumeState: VolumeState | null, s
     case "url":
       return <Globe size={size} strokeWidth={1.8} color="#60A5FA" />;
     case "volume":
+      if (act.target === "mic") {
+        return volumeState?.micMuted ? (
+          <MicOff size={size} strokeWidth={2} color="#F87171" />
+        ) : (
+          <Mic size={size} strokeWidth={1.8} color="#38BDF8" />
+        );
+      }
       if (act.command === "mute") {
         return volumeState?.muted ? (
           <VolumeX size={size} strokeWidth={2} color="#F87171" />
@@ -53,10 +84,15 @@ function renderFallbackIcon(item: ButtonItem, volumeState: VolumeState | null, s
         return <Volume1 size={size} strokeWidth={1.8} color="#A7F3D0" />;
       }
       return <Volume2 size={size} strokeWidth={1.8} color="#34D399" />;
+    case "audio_device":
+      return <Headphones size={size} strokeWidth={1.8} color="#38BDF8" />;
     case "media":
       if (act.command === "next") return <SkipForward size={size} strokeWidth={1.8} color="#E2E8F0" />;
       if (act.command === "prev") return <SkipBack size={size} strokeWidth={1.8} color="#E2E8F0" />;
       if (act.command === "stop") return <Square size={size} strokeWidth={1.8} color="#F87171" />;
+      if (nowPlaying?.playing) {
+        return <Pause size={size * 0.85} strokeWidth={2} color="#34D399" />;
+      }
       return (
         <span style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
           <Play size={size * 0.72} strokeWidth={2} color="#A78BFA" />
@@ -67,6 +103,12 @@ function renderFallbackIcon(item: ButtonItem, volumeState: VolumeState | null, s
       return <Keyboard size={size} strokeWidth={1.8} color="#FBBF24" />;
     case "page":
       return <ArrowRightCircle size={size} strokeWidth={1.8} color="#38BDF8" />;
+    case "multi":
+      return <Layers size={size} strokeWidth={1.8} color="#F472B6" />;
+    case "widget":
+      if (act.kind === "clock") return <Clock size={size * 0.8} strokeWidth={1.8} color="#38BDF8" />;
+      if (act.kind === "sys_stats") return <Cpu size={size * 0.8} strokeWidth={1.8} color="#34D399" />;
+      return <Music size={size * 0.8} strokeWidth={1.8} color="#A78BFA" />;
     default:
       return <AppWindow size={size} strokeWidth={1.8} color="#CBD5E1" />;
   }
@@ -80,9 +122,15 @@ export const ButtonTile: React.FC<Props> = ({
   cellSize,
   borderRadius,
   editMode,
+  locked,
   isDropHover,
   isDraggingSource,
+  isRunning,
+  isForeground,
   volumeState,
+  nowPlaying,
+  systemStats,
+  clockText,
   onExecute,
   onEdit,
   onStartSlotDrag,
@@ -102,15 +150,16 @@ export const ButtonTile: React.FC<Props> = ({
           width: cellSize,
           height: cellSize,
           borderRadius,
+          touchAction: editMode ? "none" : "pan-y",
         }}
         onClick={() => {
-          if (editMode) onEdit(slotIndex);
+          if (editMode || !locked) onEdit(slotIndex);
         }}
         onContextMenu={(e) => {
           e.preventDefault();
           onEdit(slotIndex);
         }}
-        title="파일/바로가기를 끌어다 놓거나 우클릭하여 추가"
+        title="파일/바로가기를 끌어다 놓거나 눌러서 추가"
       >
         <Plus size={20} className="empty-plus" />
       </button>
@@ -131,6 +180,13 @@ export const ButtonTile: React.FC<Props> = ({
       item.bgOpacity ?? theme.defaultButtonOpacity
     );
   }
+
+  const effectiveFontSize =
+    theme.autoFontSize !== false
+      ? Math.max(10, Math.min(18, Math.round(cellSize * 0.105)))
+      : item.fontSize || 13;
+
+  const isWidget = item.action.type === "widget";
 
   return (
     <button
@@ -154,38 +210,108 @@ export const ButtonTile: React.FC<Props> = ({
         e.preventDefault();
         onEdit(slotIndex);
       }}
-      title={item.label}
+      title={
+        item.action.type === "media" && nowPlaying
+          ? `${item.label} — ${nowPlaying.title}${nowPlaying.artist ? ` (${nowPlaying.artist})` : ""}`
+          : item.label
+      }
     >
-      {item.action.type === "volume" && volumeState && (
-        <span className={`vol-badge ${volumeState.muted ? "vol-muted" : ""}`}>
-          {volumeState.muted ? "MUTE" : `${volumeState.level}%`}
-        </span>
+      {item.accentColor && (
+        <span
+          className="tile-accent-bar"
+          style={{ backgroundColor: item.accentColor }}
+        />
       )}
 
-      <div className="tile-icon-wrap" style={{ height: iconBoxSize }}>
-        {iconSrc ? (
-          <img
-            src={iconSrc}
-            alt={item.label}
-            className="tile-icon-img"
-            style={{ width: iconBoxSize, height: iconBoxSize }}
-            draggable={false}
-          />
-        ) : (
-          renderFallbackIcon(item, volumeState, Math.round(iconBoxSize * 0.72))
-        )}
-      </div>
-
-      {item.showLabel && (
+      {item.action.type === "app" && isRunning && (
         <span
-          className="tile-label"
-          style={{
-            color: item.textColor || "#FFFFFF",
-            fontSize: item.fontSize || 13,
-          }}
-        >
-          {item.label}
-        </span>
+          className={`running-dot ${isForeground ? "running-dot-fg" : ""}`}
+          title={isForeground ? "현재 활성 창" : "실행 중"}
+        />
+      )}
+
+      {item.badge && <span className="corner-badge">{item.badge}</span>}
+
+      {item.action.type === "volume" && volumeState && (
+        item.action.target === "mic" ? (
+          <span className={`vol-badge ${volumeState.micMuted ? "vol-muted" : ""}`}>
+            {volumeState.micMuted ? "MIC OFF" : "MIC ON"}
+          </span>
+        ) : (
+          <span className={`vol-badge ${volumeState.muted ? "vol-muted" : ""}`}>
+            {volumeState.muted ? "MUTE" : `${volumeState.level}%`}
+          </span>
+        )
+      )}
+
+      {isWidget && item.action.type === "widget" ? (
+        <div className="widget-box">
+          {item.action.kind === "clock" && (
+            <>
+              <div className="widget-main" style={{ fontSize: Math.round(cellSize * 0.2) }}>
+                {clockText.time}
+              </div>
+              <div className="widget-sub">{clockText.date}</div>
+            </>
+          )}
+          {item.action.kind === "sys_stats" && (
+            <>
+              <div className="widget-stat-row">
+                <span className="widget-k">CPU</span>
+                <span className="widget-v">{systemStats ? `${systemStats.cpuPercent}%` : "--"}</span>
+              </div>
+              <div className="widget-stat-row">
+                <span className="widget-k">RAM</span>
+                <span className="widget-v">{systemStats ? `${systemStats.memPercent}%` : "--"}</span>
+              </div>
+            </>
+          )}
+          {item.action.kind === "now_playing" && (
+            <>
+              <Music size={Math.round(cellSize * 0.22)} color={nowPlaying?.playing ? "#34D399" : "#94A3B8"} />
+              <div className="widget-track">
+                {nowPlaying ? nowPlaying.title : "재생 중인 곡 없음"}
+              </div>
+              {nowPlaying?.artist && <div className="widget-sub">{nowPlaying.artist}</div>}
+            </>
+          )}
+        </div>
+      ) : (
+        <>
+          <div className="tile-icon-wrap" style={{ height: iconBoxSize }}>
+            {iconSrc ? (
+              <img
+                src={iconSrc}
+                alt={item.label}
+                className="tile-icon-img"
+                style={{
+                  width: iconBoxSize,
+                  height: iconBoxSize,
+                  borderRadius: theme.iconRounded !== false ? Math.round(iconBoxSize * 0.22) : 0,
+                }}
+                draggable={false}
+              />
+            ) : (
+              renderFallbackIcon(item, volumeState, nowPlaying, Math.round(iconBoxSize * 0.72))
+            )}
+          </div>
+
+          {item.showLabel && (
+            <span
+              className="tile-label"
+              style={{
+                color: item.textColor || "#FFFFFF",
+                fontSize: effectiveFontSize,
+              }}
+            >
+              {item.label}
+            </span>
+          )}
+
+          {item.action.type === "media" && item.action.command === "play_pause" && nowPlaying && (
+            <span className="media-mini-title">{nowPlaying.title}</span>
+          )}
+        </>
       )}
     </button>
   );

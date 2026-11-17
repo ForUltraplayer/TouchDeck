@@ -16,12 +16,29 @@ import { api, assetUrl, hexToRgba } from "./api";
 import { ButtonEditorModal } from "./components/ButtonEditorModal";
 import { ButtonTile } from "./components/ButtonTile";
 import { SettingsDrawer } from "./components/SettingsDrawer";
-import type { ButtonItem, DeckConfig, VolumeState } from "./types";
+import type {
+  ButtonItem,
+  DeckConfig,
+  NowPlayingInfo,
+  RunningStatus,
+  SystemStats,
+  VolumeState,
+} from "./types";
 
 const HEADER_H = 34;
 const FOOTER_H = 38;
 const PAD_X = 14;
 const PAD_Y = 10;
+
+function formatClock(): { time: string; date: string } {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  const month = now.getMonth() + 1;
+  const day = now.getDate();
+  const week = ["일", "월", "화", "수", "목", "금", "토"][now.getDay()];
+  return { time: `${hh}:${mm}`, date: `${month}/${day} (${week})` };
+}
 
 export const App: React.FC = () => {
   const [config, setConfig] = useState<DeckConfig | null>(null);
@@ -39,12 +56,17 @@ export const App: React.FC = () => {
   } | null>(null);
   const [assetMap, setAssetMap] = useState<Record<string, string>>({});
   const [volumeState, setVolumeState] = useState<VolumeState | null>(null);
+  const [nowPlaying, setNowPlaying] = useState<NowPlayingInfo | null>(null);
+  const [systemStats, setSystemStats] = useState<SystemStats | null>(null);
+  const [runningStatus, setRunningStatus] = useState<RunningStatus | null>(null);
+  const [clockText, setClockText] = useState(formatClock);
   const [toast, setToast] = useState<string | null>(null);
 
   const swipeRef = useRef<{ startX: number; startY: number; swiping: boolean } | null>(null);
   const suppressClickUntilRef = useRef(0);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevModalOpenRef = useRef(false);
+  const userHiddenRef = useRef(false);
   const slotDragPendingRef = useRef<{
     fromSlot: number;
     startX: number;
@@ -66,25 +88,88 @@ export const App: React.FC = () => {
     setConfig(loaded);
   }, []);
 
-  // Load initial config and volume state
+  // Initial config load
   useEffect(() => {
     reloadConfig().catch((e) => showToast(`설정 로드 오류: ${String(e)}`));
-    api.getVolumeState().then(setVolumeState).catch(() => {});
-    const timer = setInterval(() => {
-      api.getVolumeState().then(setVolumeState).catch(() => {});
-    }, 3500);
-    return () => clearInterval(timer);
   }, [reloadConfig, showToast]);
 
-  // Listen tray "open-settings" event
+  // Listen tray events
   useEffect(() => {
-    const unlisten = listen("open-settings", () => {
+    const u1 = listen("open-settings", () => {
+      userHiddenRef.current = false;
       setSettingsOpen(true);
     });
+    const u2 = listen("tray-show", () => {
+      userHiddenRef.current = false;
+    });
+    const u3 = listen("tray-hide", () => {
+      userHiddenRef.current = true;
+    });
     return () => {
-      unlisten.then((fn) => fn());
+      u1.then((fn) => fn());
+      u2.then((fn) => fn());
+      u3.then((fn) => fn());
     };
   }, []);
+
+  // Poll live status (volume, running processes, SMTC, CPU/RAM, clock)
+  useEffect(() => {
+    const poll = () => {
+      const cur = configRef.current;
+      if (!cur) return;
+      const page = cur.pages[pageIndexRef.current] ?? cur.pages[0];
+      if (!page) return;
+      const items = Object.values(page.slots);
+
+      const procs: string[] = [];
+      let needMedia = false;
+      let needStats = false;
+      let needVol = false;
+
+      for (const b of items) {
+        if (b.action.type === "app") {
+          const pn = b.action.procName || b.action.exe.split(/[\\/]/).pop()?.replace(/\.exe$/i, "") || "";
+          if (pn) procs.push(pn);
+        } else if (b.action.type === "volume") {
+          needVol = true;
+        } else if (b.action.type === "media") {
+          needMedia = true;
+        } else if (b.action.type === "widget") {
+          if (b.action.kind === "now_playing") needMedia = true;
+          if (b.action.kind === "sys_stats") needStats = true;
+        }
+      }
+
+      if (needVol) api.getVolumeState().then(setVolumeState).catch(() => {});
+      if (procs.length > 0) api.getRunningStatus(procs).then(setRunningStatus).catch(() => {});
+      if (needMedia) api.getNowPlaying().then(setNowPlaying).catch(() => {});
+      if (needStats) api.getSystemStats().then(setSystemStats).catch(() => {});
+      setClockText(formatClock());
+    };
+
+    poll();
+    const timer = setInterval(poll, 2500);
+    return () => clearInterval(timer);
+  }, [pageIndex, config?.pages]);
+
+  // Win+D defense when desktopLayer is enabled
+  useEffect(() => {
+    if (!config?.window.desktopLayer) return;
+    const timer = setInterval(() => {
+      if (!userHiddenRef.current) {
+        api.ensureDesktopVisible().catch(() => {});
+      }
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [config?.window.desktopLayer]);
+
+  // Toggle WS_EX_NOACTIVATE so touching buttons doesn't steal focus from active apps
+  const modalOpen = settingsOpen || editingSlot !== null;
+  useEffect(() => {
+    if (!config) return;
+    const wantNoActivate = !modalOpen && !editMode;
+    api.setNoActivate(wantNoActivate).catch(() => {});
+  }, [config !== null, modalOpen, editMode]);
 
   // Resolve relative asset paths -> absolute paths for convertFileSrc
   useEffect(() => {
@@ -119,21 +204,26 @@ export const App: React.FC = () => {
     });
   }, [config, assetMap]);
 
-  // Apply window position and alwaysOnTop once on initial load
+  // Apply window position (with multi-monitor clamp) and alwaysOnTop once on initial load
   const initialWindowAppliedRef = useRef(false);
   useEffect(() => {
     if (!config || initialWindowAppliedRef.current) return;
     initialWindowAppliedRef.current = true;
     const win = getCurrentWindow();
+    const { columns, rows, cellSize, gap } = config.grid;
+    const gridW = columns * cellSize + Math.max(0, columns - 1) * gap + PAD_X * 2;
+    const gridH = rows * cellSize + Math.max(0, rows - 1) * gap + HEADER_H + FOOTER_H + PAD_Y * 2;
     if (config.window.x !== null && config.window.y !== null) {
-      win.setPosition(new PhysicalPosition(config.window.x, config.window.y)).catch(() => {});
+      api
+        .clampWindowPos(config.window.x, config.window.y, gridW, gridH)
+        .then(([cx, cy]) => win.setPosition(new PhysicalPosition(cx, cy)))
+        .catch(() => {});
     }
     win.setAlwaysOnTop(config.window.alwaysOnTop).catch(() => {});
   }, [config]);
 
   // Sync window size dynamically with grid size.
   // Never resize while settings/editor modal is open so sliders do not jitter under the cursor.
-  const modalOpen = settingsOpen || editingSlot !== null;
   const gridCols = config?.grid.columns;
   const gridRows = config?.grid.rows;
   const gridCellSize = config?.grid.cellSize;
@@ -192,13 +282,16 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  const persistConfig = useCallback((next: DeckConfig) => {
-    setConfig(next);
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => {
-      api.saveConfig(next).catch((e) => showToast(`저장 실패: ${String(e)}`));
-    }, 220);
-  }, [showToast]);
+  const persistConfig = useCallback(
+    (next: DeckConfig) => {
+      setConfig(next);
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = setTimeout(() => {
+        api.saveConfig(next).catch((e) => showToast(`저장 실패: ${String(e)}`));
+      }, 220);
+    },
+    [showToast]
+  );
 
   // Find slot index under CSS client position
   const findSlotAtClientPos = useCallback((cx: number, cy: number): number | null => {
@@ -304,6 +397,8 @@ export const App: React.FC = () => {
               bgColor: null,
               bgOpacity: null,
               iconPath: resolved.iconPath,
+              badge: null,
+              accentColor: null,
               action:
                 resolved.kind === "folder"
                   ? { type: "folder", path: resolved.exe }
@@ -315,11 +410,12 @@ export const App: React.FC = () => {
                       args: resolved.args,
                       workDir: resolved.workDir,
                       procName: resolved.procName,
+                      toggleMinimize: false,
                     },
             };
             nextSlots[String(targetSlot)] = newBtn;
             showToast(`등록됨: ${newBtn.label}`);
-            targetSlot = null; // next file picks next empty slot
+            targetSlot = null;
           } catch (e) {
             showToast(`등록 실패: ${String(e)}`);
           }
@@ -347,10 +443,16 @@ export const App: React.FC = () => {
       }
       return;
     }
+    if (item.action.type === "widget") {
+      return;
+    }
     try {
       const res = await api.executeAction(item.action);
       if (res.volume) {
         setVolumeState(res.volume);
+      }
+      if (res.message) {
+        showToast(res.message);
       }
     } catch (e) {
       showToast(`실행 오류: ${String(e)}`);
@@ -376,6 +478,47 @@ export const App: React.FC = () => {
     );
     persistConfig({ ...config, pages: nextPages });
     setEditingSlot(null);
+  };
+
+  const handleTransferToPage = (slotIdx: number, targetPageIdx: number, move: boolean) => {
+    if (!config || !currentPage || targetPageIdx === pageIndex) return;
+    const srcItem = currentPage.slots[String(slotIdx)];
+    const targetPage = config.pages[targetPageIdx];
+    if (!srcItem || !targetPage) return;
+
+    const totalSlots = config.grid.columns * config.grid.rows;
+    let freeSlot: number | null = null;
+    for (let i = 0; i < totalSlots; i++) {
+      if (!targetPage.slots[String(i)]) {
+        freeSlot = i;
+        break;
+      }
+    }
+    if (freeSlot === null) {
+      showToast(`"${targetPage.name}" 페이지에 빈 칸이 없습니다.`);
+      return;
+    }
+
+    const copied: ButtonItem = {
+      ...structuredClone(srcItem),
+      id: move ? srcItem.id : `btn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    };
+
+    const nextPages = config.pages.map((p, idx) => {
+      if (idx === targetPageIdx) {
+        return { ...p, slots: { ...p.slots, [String(freeSlot)]: copied } };
+      }
+      if (move && idx === pageIndex) {
+        const nextSlots = { ...p.slots };
+        delete nextSlots[String(slotIdx)];
+        return { ...p, slots: nextSlots };
+      }
+      return p;
+    });
+
+    persistConfig({ ...config, pages: nextPages });
+    setEditingSlot(null);
+    showToast(`${targetPage.name} 페이지로 ${move ? "이동" : "복제"}되었습니다.`);
   };
 
   const handleSwapSlot = (fromSlot: number, toSlot: number) => {
@@ -488,9 +631,7 @@ export const App: React.FC = () => {
     if (!config) return {};
     const { theme } = config;
     if (theme.backgroundType === "image" && theme.backgroundImage) {
-      return {
-        backgroundColor: "transparent",
-      };
+      return { backgroundColor: "transparent" };
     }
     if (theme.backgroundType === "gradient") {
       return {
@@ -514,6 +655,11 @@ export const App: React.FC = () => {
     config.theme.backgroundType === "image" && config.theme.backgroundImage
       ? assetUrl(assetMap[config.theme.backgroundImage])
       : null;
+
+  const runningSet = new Set(
+    (runningStatus?.running ?? []).map((s) => s.toLowerCase().replace(/\.exe$/i, ""))
+  );
+  const fgProc = (runningStatus?.foregroundProc ?? "").toLowerCase();
 
   return (
     <div
@@ -547,6 +693,16 @@ export const App: React.FC = () => {
         <div
           className="drag-handle"
           data-tauri-drag-region={!config.window.locked ? true : undefined}
+          onPointerDown={() => {
+            if (!config.window.locked) {
+              api.setNoActivate(false).catch(() => {});
+              setTimeout(() => {
+                if (!modalOpen && !editMode) {
+                  api.setNoActivate(true).catch(() => {});
+                }
+              }, 1500);
+            }
+          }}
         >
           <span className="brand-dot" />
           <span className="brand-title">{currentPage.name}</span>
@@ -590,7 +746,10 @@ export const App: React.FC = () => {
           <button
             type="button"
             className="hdr-btn"
-            onClick={() => getCurrentWindow().hide()}
+            onClick={() => {
+              userHiddenRef.current = true;
+              getCurrentWindow().hide();
+            }}
             title="트레이로 숨기기"
           >
             <Minus size={14} />
@@ -617,6 +776,17 @@ export const App: React.FC = () => {
         {Array.from({ length: totalSlots }, (_, idx) => {
           const item = currentPage.slots[String(idx)];
           const resolvedIcon = item?.iconPath ? assetMap[item.iconPath] : undefined;
+          let procKey = "";
+          if (item?.action.type === "app") {
+            procKey = (
+              item.action.procName ||
+              item.action.exe.split(/[\\/]/).pop()?.replace(/\.exe$/i, "") ||
+              ""
+            ).toLowerCase();
+          }
+          const isRunning = procKey !== "" && runningSet.has(procKey);
+          const isForeground = procKey !== "" && fgProc === procKey;
+
           return (
             <ButtonTile
               key={idx}
@@ -627,9 +797,15 @@ export const App: React.FC = () => {
               cellSize={config.grid.cellSize}
               borderRadius={config.grid.borderRadius}
               editMode={editMode}
+              locked={config.window.locked}
               isDropHover={dropHoverSlot === idx || (dragSwap !== null && dragSwap.overSlot === idx)}
               isDraggingSource={dragSwap !== null && dragSwap.fromSlot === idx}
+              isRunning={isRunning}
+              isForeground={isForeground}
               volumeState={volumeState}
+              nowPlaying={nowPlaying}
+              systemStats={systemStats}
+              clockText={clockText}
               onExecute={handleExecute}
               onEdit={(s) => setEditingSlot(s)}
               onStartSlotDrag={handleStartSlotDrag}
@@ -691,10 +867,12 @@ export const App: React.FC = () => {
       {editingSlot !== null && (
         <ButtonEditorModal
           slotIndex={editingSlot}
+          currentPageIndex={pageIndex}
           initialItem={currentPage.slots[String(editingSlot)]}
           pages={config.pages}
           onSave={handleSaveSlot}
           onDelete={handleDeleteSlot}
+          onTransferToPage={handleTransferToPage}
           onClose={() => setEditingSlot(null)}
         />
       )}
