@@ -25,6 +25,7 @@ export interface ThemeConfig {
   fontFamily: string;
   defaultButtonColor: string;
   defaultButtonOpacity: number;
+  buttonStyle?: "solid" | "glass" | "transparent";
 }
 
 export type ButtonAction =

@@ -117,25 +117,29 @@ export const ButtonTile: React.FC<Props> = ({
     );
   }
 
-  const bg = hexToRgba(
-    item.bgColor || theme.defaultButtonColor,
-    item.bgOpacity ?? theme.defaultButtonOpacity
-  );
+  const buttonStyle = theme.buttonStyle ?? "solid";
+  const hasCustomBg = item.bgColor !== null || item.bgOpacity !== null;
+  const tileStyle: React.CSSProperties = {
+    width: cellSize,
+    height: cellSize,
+    borderRadius,
+    touchAction: editMode ? "none" : "pan-y",
+  };
+  if (hasCustomBg || buttonStyle === "solid") {
+    tileStyle.backgroundColor = hexToRgba(
+      item.bgColor || theme.defaultButtonColor,
+      item.bgOpacity ?? theme.defaultButtonOpacity
+    );
+  }
 
   return (
     <button
       type="button"
       data-slot-index={slotIndex}
-      className={`tile tile-filled ${editMode ? "tile-edit-wiggle" : ""} ${
-        isDropHover ? "tile-drop-hover" : ""
-      } ${isDraggingSource ? "tile-dragging-src" : ""}`}
-      style={{
-        width: cellSize,
-        height: cellSize,
-        borderRadius,
-        backgroundColor: bg,
-        touchAction: editMode ? "none" : "auto",
-      }}
+      className={`tile tile-filled tile-style-${hasCustomBg ? "solid" : buttonStyle} ${
+        editMode ? "tile-edit-wiggle" : ""
+      } ${isDropHover ? "tile-drop-hover" : ""} ${isDraggingSource ? "tile-dragging-src" : ""}`}
+      style={tileStyle}
       onPointerDown={(e) => {
         if (editMode && e.button === 0) {
           onStartSlotDrag(slotIndex, e);

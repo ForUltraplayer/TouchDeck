@@ -30,6 +30,7 @@ export const App: React.FC = () => {
   const [editingSlot, setEditingSlot] = useState<number | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dropHoverSlot, setDropHoverSlot] = useState<number | null>(null);
+  const [swipeOffset, setSwipeOffset] = useState(0);
   const [dragSwap, setDragSwap] = useState<{
     fromSlot: number;
     overSlot: number | null;
@@ -40,7 +41,10 @@ export const App: React.FC = () => {
   const [volumeState, setVolumeState] = useState<VolumeState | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  const swipeStartRef = useRef<{ x: number; y: number } | null>(null);
+  const swipeRef = useRef<{ startX: number; startY: number; swiping: boolean } | null>(null);
+  const suppressClickUntilRef = useRef(0);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevModalOpenRef = useRef(false);
   const slotDragPendingRef = useRef<{
     fromSlot: number;
     startX: number;
@@ -49,6 +53,8 @@ export const App: React.FC = () => {
   } | null>(null);
   const configRef = useRef<DeckConfig | null>(null);
   configRef.current = config;
+  const pageIndexRef = useRef(pageIndex);
+  pageIndexRef.current = pageIndex;
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -125,18 +131,37 @@ export const App: React.FC = () => {
     win.setAlwaysOnTop(config.window.alwaysOnTop).catch(() => {});
   }, [config]);
 
-  // Sync window size dynamically with grid size (and expand temporarily when modals open)
+  // Sync window size dynamically with grid size.
+  // Never resize while settings/editor modal is open so sliders do not jitter under the cursor.
+  const modalOpen = settingsOpen || editingSlot !== null;
+  const gridCols = config?.grid.columns;
+  const gridRows = config?.grid.rows;
+  const gridCellSize = config?.grid.cellSize;
+  const gridGap = config?.grid.gap;
+
   useEffect(() => {
-    if (!config) return;
-    const { columns, rows, cellSize, gap } = config.grid;
-    const gridW = columns * cellSize + Math.max(0, columns - 1) * gap + PAD_X * 2;
+    if (
+      gridCols === undefined ||
+      gridRows === undefined ||
+      gridCellSize === undefined ||
+      gridGap === undefined
+    ) {
+      return;
+    }
+    const wasOpen = prevModalOpenRef.current;
+    prevModalOpenRef.current = modalOpen;
+
+    if (modalOpen && wasOpen) {
+      return;
+    }
+
+    const gridW = gridCols * gridCellSize + Math.max(0, gridCols - 1) * gridGap + PAD_X * 2;
     const gridH =
-      rows * cellSize + Math.max(0, rows - 1) * gap + HEADER_H + FOOTER_H + PAD_Y * 2;
-    const needModalSpace = settingsOpen || editingSlot !== null;
-    const w = needModalSpace ? Math.max(gridW, 560) : gridW;
-    const h = needModalSpace ? Math.max(gridH, 640) : gridH;
+      gridRows * gridCellSize + Math.max(0, gridRows - 1) * gridGap + HEADER_H + FOOTER_H + PAD_Y * 2;
+    const w = modalOpen ? Math.max(gridW, 600) : gridW;
+    const h = modalOpen ? Math.max(gridH, 680) : gridH;
     getCurrentWindow().setSize(new LogicalSize(w, h)).catch(() => {});
-  }, [config?.grid, settingsOpen, editingSlot]);
+  }, [gridCols, gridRows, gridCellSize, gridGap, modalOpen]);
 
   // Sync alwaysOnTop changes
   useEffect(() => {
@@ -169,7 +194,10 @@ export const App: React.FC = () => {
 
   const persistConfig = useCallback((next: DeckConfig) => {
     setConfig(next);
-    api.saveConfig(next).catch((e) => showToast(`저장 실패: ${String(e)}`));
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      api.saveConfig(next).catch((e) => showToast(`저장 실패: ${String(e)}`));
+    }, 220);
   }, [showToast]);
 
   // Find slot index under CSS client position
@@ -236,11 +264,19 @@ export const App: React.FC = () => {
                 showToast(`아이콘 이미지 변경: ${nextSlots[String(targetSlot)].label}`);
               } else {
                 const rel = await api.importImage(droppedPath, "bg");
+                const curStyle = cur.theme.buttonStyle ?? "solid";
                 persistConfig({
                   ...cur,
-                  theme: { ...cur.theme, backgroundType: "image", backgroundImage: rel },
+                  theme: {
+                    ...cur.theme,
+                    backgroundType: "image",
+                    backgroundImage: rel,
+                    buttonStyle: curStyle === "solid" ? "glass" : curStyle,
+                    backgroundBlur: cur.theme.backgroundBlur === 8 ? 2 : cur.theme.backgroundBlur,
+                    backgroundDim: cur.theme.backgroundDim === 35 ? 20 : cur.theme.backgroundDim,
+                  },
                 });
-                showToast("패널 배경 이미지가 적용되었습니다.");
+                showToast("배경 이미지 테마가 적용되었습니다.");
                 return;
               }
               continue;
@@ -304,6 +340,7 @@ export const App: React.FC = () => {
   const currentPage = config?.pages[pageIndex] ?? config?.pages[0];
 
   const handleExecute = async (item: ButtonItem) => {
+    if (Date.now() < suppressClickUntilRef.current) return;
     if (item.action.type === "page") {
       if (config && item.action.pageIndex >= 0 && item.action.pageIndex < config.pages.length) {
         setPageIndex(item.action.pageIndex);
@@ -372,35 +409,68 @@ export const App: React.FC = () => {
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
       const p = slotDragPendingRef.current;
-      if (!p) return;
-      const dist = Math.hypot(e.clientX - p.startX, e.clientY - p.startY);
-      if (!p.active && dist >= 8) {
-        p.active = true;
+      if (p) {
+        const dist = Math.hypot(e.clientX - p.startX, e.clientY - p.startY);
+        if (!p.active && dist >= 8) {
+          p.active = true;
+        }
+        if (p.active) {
+          const overSlot = findSlotAtClientPos(e.clientX, e.clientY);
+          setDragSwap({
+            fromSlot: p.fromSlot,
+            overSlot,
+            clientX: e.clientX,
+            clientY: e.clientY,
+          });
+        }
+        return;
       }
-      if (p.active) {
-        const overSlot = findSlotAtClientPos(e.clientX, e.clientY);
-        setDragSwap({
-          fromSlot: p.fromSlot,
-          overSlot,
-          clientX: e.clientX,
-          clientY: e.clientY,
-        });
+
+      const s = swipeRef.current;
+      if (s) {
+        const dx = e.clientX - s.startX;
+        const dy = e.clientY - s.startY;
+        if (!s.swiping && Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy) * 1.15) {
+          s.swiping = true;
+        }
+        if (s.swiping) {
+          setSwipeOffset(Math.max(-90, Math.min(90, dx * 0.45)));
+        }
       }
     };
 
     const onUp = (e: PointerEvent) => {
       const p = slotDragPendingRef.current;
-      if (!p) return;
-      slotDragPendingRef.current = null;
-      setDragSwap(null);
+      if (p) {
+        slotDragPendingRef.current = null;
+        setDragSwap(null);
 
-      if (p.active) {
-        const overSlot = findSlotAtClientPos(e.clientX, e.clientY);
-        if (overSlot !== null && overSlot !== p.fromSlot) {
-          handleSwapSlotRef.current(p.fromSlot, overSlot);
+        if (p.active) {
+          const overSlot = findSlotAtClientPos(e.clientX, e.clientY);
+          if (overSlot !== null && overSlot !== p.fromSlot) {
+            handleSwapSlotRef.current(p.fromSlot, overSlot);
+          }
+        } else {
+          setEditingSlot(p.fromSlot);
         }
-      } else {
-        setEditingSlot(p.fromSlot);
+        return;
+      }
+
+      const s = swipeRef.current;
+      if (s) {
+        swipeRef.current = null;
+        const dx = e.clientX - s.startX;
+        setSwipeOffset(0);
+        if (s.swiping && Math.abs(dx) >= 42) {
+          suppressClickUntilRef.current = Date.now() + 260;
+          const total = configRef.current?.pages.length ?? 1;
+          const curIdx = pageIndexRef.current;
+          if (dx < 0 && curIdx < total - 1) {
+            setPageIndex(curIdx + 1);
+          } else if (dx > 0 && curIdx > 0) {
+            setPageIndex(curIdx - 1);
+          }
+        }
       }
     };
 
@@ -417,6 +487,11 @@ export const App: React.FC = () => {
   const panelBgStyle = useMemo<React.CSSProperties>(() => {
     if (!config) return {};
     const { theme } = config;
+    if (theme.backgroundType === "image" && theme.backgroundImage) {
+      return {
+        backgroundColor: "transparent",
+      };
+    }
     if (theme.backgroundType === "gradient") {
       return {
         background: `linear-gradient(155deg, ${hexToRgba(
@@ -446,23 +521,6 @@ export const App: React.FC = () => {
       style={{
         fontFamily: `"${config.theme.fontFamily}", "Pretendard", "Segoe UI", sans-serif`,
         ...panelBgStyle,
-      }}
-      onPointerDown={(e) => {
-        if (editMode) return;
-        swipeStartRef.current = { x: e.clientX, y: e.clientY };
-      }}
-      onPointerUp={(e) => {
-        if (editMode || !swipeStartRef.current) return;
-        const dx = e.clientX - swipeStartRef.current.x;
-        const dy = e.clientY - swipeStartRef.current.y;
-        swipeStartRef.current = null;
-        if (Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy) * 1.5) {
-          if (dx < 0 && pageIndex < config.pages.length - 1) {
-            setPageIndex((i) => i + 1);
-          } else if (dx > 0 && pageIndex > 0) {
-            setPageIndex((i) => i - 1);
-          }
-        }
       }}
     >
       {bgImgUrl && (
@@ -542,12 +600,18 @@ export const App: React.FC = () => {
 
       {/* Grid */}
       <main
-        className="deck-grid"
+        className={`deck-grid ${swipeOffset === 0 ? "deck-grid-snap" : ""}`}
         style={{
           gridTemplateColumns: `repeat(${config.grid.columns}, ${config.grid.cellSize}px)`,
           gridTemplateRows: `repeat(${config.grid.rows}, ${config.grid.cellSize}px)`,
           gap: config.grid.gap,
           padding: `${PAD_Y}px ${PAD_X}px`,
+          touchAction: editMode ? "none" : "pan-y",
+          transform: swipeOffset !== 0 ? `translateX(${swipeOffset}px)` : undefined,
+        }}
+        onPointerDown={(e) => {
+          if (editMode || e.button !== 0 || modalOpen) return;
+          swipeRef.current = { startX: e.clientX, startY: e.clientY, swiping: false };
         }}
       >
         {Array.from({ length: totalSlots }, (_, idx) => {

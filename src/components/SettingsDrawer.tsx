@@ -47,7 +47,14 @@ export const SettingsDrawer: React.FC<Props> = ({
     });
     if (!selected || typeof selected !== "string") return;
     const rel = await api.importImage(selected, "bg");
-    updateTheme({ backgroundType: "image", backgroundImage: rel });
+    const curStyle = config.theme.buttonStyle ?? "solid";
+    updateTheme({
+      backgroundType: "image",
+      backgroundImage: rel,
+      buttonStyle: curStyle === "solid" ? "glass" : curStyle,
+      backgroundBlur: config.theme.backgroundBlur === 8 ? 2 : config.theme.backgroundBlur,
+      backgroundDim: config.theme.backgroundDim === 35 ? 20 : config.theme.backgroundDim,
+    });
   };
 
   const handleAddPage = () => {
@@ -186,15 +193,18 @@ export const SettingsDrawer: React.FC<Props> = ({
               <label>배경 방식</label>
               <select
                 value={config.theme.backgroundType}
-                onChange={(e) =>
-                  updateTheme({
-                    backgroundType: e.target.value as DeckConfig["theme"]["backgroundType"],
-                  })
-                }
+                onChange={(e) => {
+                  const nextType = e.target.value as DeckConfig["theme"]["backgroundType"];
+                  const patch: Partial<DeckConfig["theme"]> = { backgroundType: nextType };
+                  if (nextType === "image" && (config.theme.buttonStyle ?? "solid") === "solid") {
+                    patch.buttonStyle = "glass";
+                  }
+                  updateTheme(patch);
+                }}
               >
                 <option value="solid">단색 + 투명도</option>
                 <option value="gradient">그라데이션</option>
-                <option value="image">배경 이미지</option>
+                <option value="image">배경 이미지 테마</option>
               </select>
             </div>
             <div>
@@ -208,17 +218,54 @@ export const SettingsDrawer: React.FC<Props> = ({
             </div>
           </div>
 
-          <div className="field-row two-col">
-            <div>
-              <label>배경색</label>
-              <input
-                type="color"
-                value={config.theme.backgroundColor}
-                onChange={(e) => updateTheme({ backgroundColor: e.target.value })}
-              />
+          <div className="field-row">
+            <label>버튼 스타일 (배경 이미지 사용 시 글래스/투명 추천)</label>
+            <div className="segmented-group">
+              {(
+                [
+                  ["solid", "솔리드"],
+                  ["glass", "반투명 글래스"],
+                  ["transparent", "투명 + 그림자"],
+                ] as const
+              ).map(([val, text]) => (
+                <button
+                  key={val}
+                  type="button"
+                  className={`seg-btn ${
+                    (config.theme.buttonStyle ?? "solid") === val ? "seg-btn-active" : ""
+                  }`}
+                  onClick={() => updateTheme({ buttonStyle: val })}
+                >
+                  {text}
+                </button>
+              ))}
             </div>
-            <div>
-              <label>패널 투명도 ({config.theme.backgroundOpacity}%)</label>
+          </div>
+
+          {config.theme.backgroundType !== "image" ? (
+            <div className="field-row two-col">
+              <div>
+                <label>배경색</label>
+                <input
+                  type="color"
+                  value={config.theme.backgroundColor}
+                  onChange={(e) => updateTheme({ backgroundColor: e.target.value })}
+                />
+              </div>
+              <div>
+                <label>패널 투명도 ({config.theme.backgroundOpacity}%)</label>
+                <input
+                  type="range"
+                  min={10}
+                  max={100}
+                  value={config.theme.backgroundOpacity}
+                  onChange={(e) => updateTheme({ backgroundOpacity: Number(e.target.value) })}
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="field-row">
+              <label>배경 이미지 투명도 ({config.theme.backgroundOpacity}%)</label>
               <input
                 type="range"
                 min={10}
@@ -227,7 +274,7 @@ export const SettingsDrawer: React.FC<Props> = ({
                 onChange={(e) => updateTheme({ backgroundOpacity: Number(e.target.value) })}
               />
             </div>
-          </div>
+          )}
 
           {config.theme.backgroundType === "gradient" && (
             <div className="field-row">
@@ -252,7 +299,13 @@ export const SettingsDrawer: React.FC<Props> = ({
                     <button
                       type="button"
                       className="btn-secondary"
-                      onClick={() => updateTheme({ backgroundType: "solid", backgroundImage: null })}
+                      onClick={() =>
+                        updateTheme({
+                          backgroundType: "solid",
+                          backgroundImage: null,
+                          buttonStyle: "solid",
+                        })
+                      }
                     >
                       제거
                     </button>
@@ -284,26 +337,28 @@ export const SettingsDrawer: React.FC<Props> = ({
             </>
           )}
 
-          <div className="field-row two-col">
-            <div>
-              <label>기본 버튼 색</label>
-              <input
-                type="color"
-                value={config.theme.defaultButtonColor}
-                onChange={(e) => updateTheme({ defaultButtonColor: e.target.value })}
-              />
+          {(config.theme.buttonStyle ?? "solid") === "solid" && (
+            <div className="field-row two-col">
+              <div>
+                <label>기본 버튼 색</label>
+                <input
+                  type="color"
+                  value={config.theme.defaultButtonColor}
+                  onChange={(e) => updateTheme({ defaultButtonColor: e.target.value })}
+                />
+              </div>
+              <div>
+                <label>기본 버튼 투명도 ({config.theme.defaultButtonOpacity}%)</label>
+                <input
+                  type="range"
+                  min={10}
+                  max={100}
+                  value={config.theme.defaultButtonOpacity}
+                  onChange={(e) => updateTheme({ defaultButtonOpacity: Number(e.target.value) })}
+                />
+              </div>
             </div>
-            <div>
-              <label>기본 버튼 투명도 ({config.theme.defaultButtonOpacity}%)</label>
-              <input
-                type="range"
-                min={10}
-                max={100}
-                value={config.theme.defaultButtonOpacity}
-                onChange={(e) => updateTheme({ defaultButtonOpacity: Number(e.target.value) })}
-              />
-            </div>
-          </div>
+          )}
 
           <div className="divider" />
           <div className="section-title-row">

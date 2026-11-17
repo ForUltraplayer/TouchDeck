@@ -36,6 +36,12 @@ pub struct ThemeConfig {
     pub font_family: String,
     pub default_button_color: String,
     pub default_button_opacity: u8,
+    #[serde(default = "default_button_style")]
+    pub button_style: String, // "solid" | "glass" | "transparent"
+}
+
+fn default_button_style() -> String {
+    "solid".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,6 +249,7 @@ impl Default for DeckConfig {
                 font_family: "Pretendard".into(),
                 default_button_color: "#32353D".into(),
                 default_button_opacity: 88,
+                button_style: "solid".into(),
             },
             pages: vec![
                 DeckPage {
