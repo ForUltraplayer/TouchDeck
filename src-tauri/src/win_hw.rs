@@ -173,14 +173,19 @@ fn read_nvml_stats(out: &mut SystemStats) -> bool {
     true
 }
 
-struct PdhState {
+struct CpuPdhState {
     query: isize,
     cpu_perf_counter: isize,
-    gpu_3d_counter: isize,
     base_mhz: u32,
 }
 
-static PDH_STATE: Mutex<Option<PdhState>> = Mutex::new(None);
+struct GpuPdhState {
+    query: isize,
+    gpu_3d_counter: isize,
+}
+
+static CPU_PDH_STATE: Mutex<Option<CpuPdhState>> = Mutex::new(None);
+static GPU_PDH_STATE: Mutex<Option<GpuPdhState>> = Mutex::new(None);
 
 fn get_base_cpu_mhz() -> u32 {
     unsafe {
@@ -204,87 +209,101 @@ fn get_base_cpu_mhz() -> u32 {
 }
 
 fn read_pdh_stats(out: &mut SystemStats, need_gpu_fallback: bool) {
-    let Ok(mut guard) = PDH_STATE.lock() else {
-        return;
-    };
     unsafe {
-        if guard.is_none() {
-            let mut query: isize = 0;
-            if PdhOpenQueryW(None, 0, &mut query) == 0 {
-                let mut cpu_c: isize = 0;
-                let _ = PdhAddEnglishCounterW(
-                    query,
-                    w!("\\Processor Information(_Total)\\% Processor Performance"),
-                    0,
-                    &mut cpu_c,
-                );
-                let mut gpu_c: isize = 0;
-                let _ = PdhAddEnglishCounterW(
-                    query,
-                    w!("\\GPU Engine(*engtype_3D)\\Utilization Percentage"),
-                    0,
-                    &mut gpu_c,
-                );
-                let _ = PdhCollectQueryData(query);
-                *guard = Some(PdhState {
-                    query,
-                    cpu_perf_counter: cpu_c,
-                    gpu_3d_counter: gpu_c,
-                    base_mhz: get_base_cpu_mhz(),
-                });
+        if let Ok(mut guard) = CPU_PDH_STATE.lock() {
+            if guard.is_none() {
+                let mut query: isize = 0;
+                if PdhOpenQueryW(None, 0, &mut query) == 0 {
+                    let mut cpu_c: isize = 0;
+                    let _ = PdhAddEnglishCounterW(
+                        query,
+                        w!("\\Processor Information(_Total)\\% Processor Performance"),
+                        0,
+                        &mut cpu_c,
+                    );
+                    let _ = PdhCollectQueryData(query);
+                    *guard = Some(CpuPdhState {
+                        query,
+                        cpu_perf_counter: cpu_c,
+                        base_mhz: get_base_cpu_mhz(),
+                    });
+                }
             }
-        }
 
-        let Some(st) = guard.as_ref() else {
-            return;
-        };
-        if PdhCollectQueryData(st.query) != 0 {
-            return;
-        }
-
-        if st.cpu_perf_counter != 0 && st.base_mhz > 0 {
-            let mut val = PDH_FMT_COUNTERVALUE::default();
-            if PdhGetFormattedCounterValue(
-                st.cpu_perf_counter,
-                PDH_FMT_DOUBLE,
-                None,
-                &mut val,
-            ) == 0
-            {
-                let pct = val.Anonymous.doubleValue;
-                if pct > 0.0 && pct < 500.0 {
-                    out.cpu_clock_mhz = Some(((st.base_mhz as f64) * pct / 100.0).round() as u32);
+            if let Some(st) = guard.as_ref() {
+                if PdhCollectQueryData(st.query) == 0
+                    && st.cpu_perf_counter != 0
+                    && st.base_mhz > 0
+                {
+                    let mut val = PDH_FMT_COUNTERVALUE::default();
+                    if PdhGetFormattedCounterValue(
+                        st.cpu_perf_counter,
+                        PDH_FMT_DOUBLE,
+                        None,
+                        &mut val,
+                    ) == 0
+                    {
+                        let pct = val.Anonymous.doubleValue;
+                        if pct > 0.0 && pct < 500.0 {
+                            out.cpu_clock_mhz =
+                                Some(((st.base_mhz as f64) * pct / 100.0).round() as u32);
+                        }
+                    }
                 }
             }
         }
 
-        if need_gpu_fallback && st.gpu_3d_counter != 0 {
-            let mut buf_size = 0u32;
-            let mut item_count = 0u32;
-            let _ = PdhGetFormattedCounterArrayW(
-                st.gpu_3d_counter,
-                PDH_FMT_DOUBLE,
-                &mut buf_size,
-                &mut item_count,
-                None,
-            );
-            if buf_size > 0 && item_count > 0 {
-                let mut raw = vec![0u8; buf_size as usize];
-                let ptr = raw.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W;
-                if PdhGetFormattedCounterArrayW(
-                    st.gpu_3d_counter,
-                    PDH_FMT_DOUBLE,
-                    &mut buf_size,
-                    &mut item_count,
-                    Some(ptr),
-                ) == 0
-                {
-                    let slice = std::slice::from_raw_parts(ptr, item_count as usize);
-                    let sum: f64 = slice
-                        .iter()
-                        .map(|item| item.FmtValue.Anonymous.doubleValue)
-                        .sum();
-                    out.gpu_percent = Some(sum.round().clamp(0.0, 100.0) as u8);
+        if need_gpu_fallback {
+            if let Ok(mut guard) = GPU_PDH_STATE.lock() {
+                if guard.is_none() {
+                    let mut query: isize = 0;
+                    if PdhOpenQueryW(None, 0, &mut query) == 0 {
+                        let mut gpu_c: isize = 0;
+                        let _ = PdhAddEnglishCounterW(
+                            query,
+                            w!("\\GPU Engine(*engtype_3D)\\Utilization Percentage"),
+                            0,
+                            &mut gpu_c,
+                        );
+                        let _ = PdhCollectQueryData(query);
+                        *guard = Some(GpuPdhState {
+                            query,
+                            gpu_3d_counter: gpu_c,
+                        });
+                    }
+                }
+
+                if let Some(st) = guard.as_ref() {
+                    if PdhCollectQueryData(st.query) == 0 && st.gpu_3d_counter != 0 {
+                        let mut buf_size = 0u32;
+                        let mut item_count = 0u32;
+                        let _ = PdhGetFormattedCounterArrayW(
+                            st.gpu_3d_counter,
+                            PDH_FMT_DOUBLE,
+                            &mut buf_size,
+                            &mut item_count,
+                            None,
+                        );
+                        if buf_size > 0 && item_count > 0 {
+                            let mut raw = vec![0u8; buf_size as usize];
+                            let ptr = raw.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W;
+                            if PdhGetFormattedCounterArrayW(
+                                st.gpu_3d_counter,
+                                PDH_FMT_DOUBLE,
+                                &mut buf_size,
+                                &mut item_count,
+                                Some(ptr),
+                            ) == 0
+                            {
+                                let slice = std::slice::from_raw_parts(ptr, item_count as usize);
+                                let sum: f64 = slice
+                                    .iter()
+                                    .map(|item| item.FmtValue.Anonymous.doubleValue)
+                                    .sum();
+                                out.gpu_percent = Some(sum.round().clamp(0.0, 100.0) as u8);
+                            }
+                        }
+                    }
                 }
             }
         }

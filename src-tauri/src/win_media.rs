@@ -90,24 +90,41 @@ fn with_endpoint_volume<T, F: FnOnce(&IAudioEndpointVolume) -> Result<T, String>
 }
 
 pub fn get_volume_state() -> Result<VolumeState, String> {
-    let (level, muted) = with_endpoint_volume(false, |vol| unsafe {
-        let scalar = vol
+    let _com = ComGuard::new();
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|e| format!("MMDeviceEnumerator: {e}"))?;
+
+        let render_dev = enumerator
+            .GetDefaultAudioEndpoint(eRender, eMultimedia)
+            .map_err(|e| format!("GetDefaultAudioEndpoint: {e}"))?;
+        let render_vol: IAudioEndpointVolume = render_dev
+            .Activate(CLSCTX_ALL, None)
+            .map_err(|e| format!("Activate IAudioEndpointVolume: {e}"))?;
+        let scalar = render_vol
             .GetMasterVolumeLevelScalar()
             .map_err(|e| format!("GetMasterVolumeLevelScalar: {e}"))?;
-        let m = vol.GetMute().map_err(|e| format!("GetMute: {e}"))?.as_bool();
-        Ok(((scalar * 100.0).round().clamp(0.0, 100.0) as u8, m))
-    })?;
+        let muted = render_vol
+            .GetMute()
+            .map_err(|e| format!("GetMute: {e}"))?
+            .as_bool();
+        let level = (scalar * 100.0).round().clamp(0.0, 100.0) as u8;
 
-    let mic_muted = with_endpoint_volume(true, |vol| unsafe {
-        Ok(vol.GetMute().map(|b| b.as_bool()).unwrap_or(false))
-    })
-    .unwrap_or(false);
+        let mic_muted = enumerator
+            .GetDefaultAudioEndpoint(eCapture, eCommunications)
+            .ok()
+            .and_then(|d| d.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None).ok())
+            .and_then(|v| v.GetMute().ok())
+            .map(|b| b.as_bool())
+            .unwrap_or(false);
 
-    Ok(VolumeState {
-        level,
-        muted,
-        mic_muted,
-    })
+        Ok(VolumeState {
+            level,
+            muted,
+            mic_muted,
+        })
+    }
 }
 
 pub fn adjust_volume(command: &str, step: u8, target: &str) -> Result<VolumeState, String> {

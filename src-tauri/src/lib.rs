@@ -261,9 +261,13 @@ fn clamp_window_pos(x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
 }
 
 #[tauri::command]
-fn set_desktop_layer(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
+fn set_desktop_layer(
+    window: tauri::WebviewWindow,
+    enabled: bool,
+    always_on_top: Option<bool>,
+) -> Result<(), String> {
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
-    win_window::set_desktop_layer(hwnd.0 as isize, enabled);
+    win_window::set_desktop_layer(hwnd.0 as isize, enabled, always_on_top.unwrap_or(false));
     Ok(())
 }
 

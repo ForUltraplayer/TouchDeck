@@ -190,11 +190,82 @@ export const App: React.FC = () => {
         }
       }
 
-      if (needVol) api.getVolumeState().then(setVolumeState).catch(() => {});
-      if (procs.length > 0) api.getRunningStatus(procs).then(setRunningStatus).catch(() => {});
-      if (needMedia) api.getNowPlaying().then(setNowPlaying).catch(() => {});
-      if (needStats) api.getSystemStats(needTemp).then(setSystemStats).catch(() => {});
-      setClockText(formatClock());
+      const uniqProcs = procs.length > 1 ? Array.from(new Set(procs)) : procs;
+
+      if (needVol) {
+        api
+          .getVolumeState()
+          .then((next) =>
+            setVolumeState((prev) =>
+              prev &&
+              prev.level === next.level &&
+              prev.muted === next.muted &&
+              prev.micMuted === next.micMuted
+                ? prev
+                : next
+            )
+          )
+          .catch(() => {});
+      }
+      if (uniqProcs.length > 0) {
+        api
+          .getRunningStatus(uniqProcs)
+          .then((next) =>
+            setRunningStatus((prev) =>
+              prev &&
+              prev.foregroundProc === next.foregroundProc &&
+              prev.running.length === next.running.length &&
+              prev.running.every((v, i) => v === next.running[i])
+                ? prev
+                : next
+            )
+          )
+          .catch(() => {});
+      }
+      if (needMedia) {
+        api
+          .getNowPlaying()
+          .then((next) =>
+            setNowPlaying((prev) => {
+              if (!prev && !next) return prev;
+              if (
+                prev &&
+                next &&
+                prev.title === next.title &&
+                prev.artist === next.artist &&
+                prev.playing === next.playing
+              ) {
+                return prev;
+              }
+              return next;
+            })
+          )
+          .catch(() => {});
+      }
+      if (needStats) {
+        api
+          .getSystemStats(needTemp)
+          .then((next) =>
+            setSystemStats((prev) =>
+              prev &&
+              prev.cpuPercent === next.cpuPercent &&
+              prev.memPercent === next.memPercent &&
+              prev.cpuClockMhz === next.cpuClockMhz &&
+              prev.cpuTempC === next.cpuTempC &&
+              prev.gpuPercent === next.gpuPercent &&
+              prev.gpuTempC === next.gpuTempC &&
+              prev.gpuClockMhz === next.gpuClockMhz &&
+              prev.vramPercent === next.vramPercent
+                ? prev
+                : next
+            )
+          )
+          .catch(() => {});
+      }
+      const nextClk = formatClock();
+      setClockText((prev) =>
+        prev.time === nextClk.time && prev.date === nextClk.date ? prev : nextClk
+      );
     };
 
     poll();
@@ -202,19 +273,10 @@ export const App: React.FC = () => {
     return () => clearInterval(timer);
   }, [pageIndex, config?.pages]);
 
-  // Win+D defense when desktopLayer is enabled (Progman owner + 150ms WorkerW Z-order guard)
+  // Win+D defense handled natively on a Rust background thread (zero JS IPC polling)
   useEffect(() => {
     if (!config) return;
-    const enabled = config.window.desktopLayer;
-    api.setDesktopLayer(enabled).catch(() => {});
-    if (!enabled) return;
-    const aot = config.window.alwaysOnTop;
-    const timer = setInterval(() => {
-      if (!userHiddenRef.current) {
-        api.tickDesktopVisibility(aot).catch(() => {});
-      }
-    }, 150);
-    return () => clearInterval(timer);
+    api.setDesktopLayer(config.window.desktopLayer, config.window.alwaysOnTop).catch(() => {});
   }, [config !== null, config?.window.desktopLayer, config?.window.alwaysOnTop]);
 
   // Toggle WS_EX_NOACTIVATE so touching buttons doesn't steal focus from active apps
@@ -500,29 +562,37 @@ export const App: React.FC = () => {
 
   const currentPage = config?.pages[pageIndex] ?? config?.pages[0];
 
-  const handleExecute = async (item: ButtonItem) => {
-    if (Date.now() < suppressClickUntilRef.current) return;
-    if (item.action.type === "page") {
-      if (config && item.action.pageIndex >= 0 && item.action.pageIndex < config.pages.length) {
-        setPageIndex(item.action.pageIndex);
+  const handleExecute = useCallback(
+    async (item: ButtonItem) => {
+      if (Date.now() < suppressClickUntilRef.current) return;
+      if (item.action.type === "page") {
+        const cur = configRef.current;
+        if (cur && item.action.pageIndex >= 0 && item.action.pageIndex < cur.pages.length) {
+          setPageIndex(item.action.pageIndex);
+        }
+        return;
       }
-      return;
-    }
-    if (item.action.type === "widget") {
-      return;
-    }
-    try {
-      const res = await api.executeAction(item.action);
-      if (res.volume) {
-        setVolumeState(res.volume);
+      if (item.action.type === "widget") {
+        return;
       }
-      if (res.message) {
-        showToast(res.message);
+      try {
+        const res = await api.executeAction(item.action);
+        if (res.volume) {
+          setVolumeState(res.volume);
+        }
+        if (res.message) {
+          showToast(res.message);
+        }
+      } catch (e) {
+        showToast(`실행 오류: ${String(e)}`);
       }
-    } catch (e) {
-      showToast(`실행 오류: ${String(e)}`);
-    }
-  };
+    },
+    [showToast]
+  );
+
+  const handleEditSlot = useCallback((slotIdx: number) => {
+    setEditingSlot(slotIdx);
+  }, []);
 
   const handleSaveSlot = (slotIdx: number, item: ButtonItem) => {
     if (!config || !currentPage) return;
@@ -573,13 +643,13 @@ export const App: React.FC = () => {
     showToast(`"${src.label}" 복제됨`);
   };
 
-  const handleOpenContextMenu = (slotIdx: number, e: React.MouseEvent) => {
+  const handleOpenContextMenu = useCallback((slotIdx: number, e: React.MouseEvent) => {
     const menuW = 176;
     const menuH = 204;
     const x = Math.max(8, Math.min(e.clientX, window.innerWidth - menuW - 8));
     const y = Math.max(8, Math.min(e.clientY, window.innerHeight - menuH - 8));
     setContextMenu({ slotIndex: slotIdx, x, y });
-  };
+  }, []);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -1089,7 +1159,7 @@ export const App: React.FC = () => {
                   systemStats={systemStats}
                   clockText={clockText}
                   onExecute={handleExecute}
-                  onEdit={(s) => setEditingSlot(s)}
+                  onEdit={handleEditSlot}
                   onContextMenu={handleOpenContextMenu}
                   onStartSlotDrag={handleStartSlotDrag}
                 />

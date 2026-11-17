@@ -38,8 +38,30 @@ pub struct RunningStatus {
 }
 
 pub fn get_running_status(targets: &[String]) -> RunningStatus {
-    let mut pid_to_name: HashMap<u32, String> = HashMap::new();
-    let mut all_names: HashSet<String> = HashSet::new();
+    let mut target_map: HashMap<String, Vec<&String>> = HashMap::with_capacity(targets.len());
+    for t in targets {
+        let trimmed = t.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let low = trimmed.to_ascii_lowercase();
+        let stem = low.strip_suffix(".exe").unwrap_or(&low).to_string();
+        if !stem.is_empty() {
+            target_map.entry(stem).or_default().push(t);
+        }
+    }
+
+    let mut fg_pid: u32 = 0;
+    unsafe {
+        let fg = GetForegroundWindow();
+        if !fg.0.is_null() {
+            GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+        }
+    }
+
+    let mut matched_stems: HashSet<String> = HashSet::with_capacity(target_map.len());
+    let mut fg_proc = String::new();
+    let mut name_buf = String::with_capacity(64);
 
     unsafe {
         if let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
@@ -52,12 +74,22 @@ pub fn get_running_status(targets: &[String]) -> RunningStatus {
                         .iter()
                         .position(|&c| c == 0)
                         .unwrap_or(entry.szExeFile.len());
-                    let raw = OsString::from_wide(&entry.szExeFile[..len])
-                        .to_string_lossy()
-                        .to_ascii_lowercase();
-                    let stem = raw.strip_suffix(".exe").unwrap_or(&raw).to_string();
-                    pid_to_name.insert(entry.th32ProcessID, stem.clone());
-                    all_names.insert(stem);
+                    name_buf.clear();
+                    for ch in std::char::decode_utf16(entry.szExeFile[..len].iter().copied()) {
+                        let c = ch.unwrap_or(std::char::REPLACEMENT_CHARACTER);
+                        for lc in c.to_lowercase() {
+                            name_buf.push(lc);
+                        }
+                    }
+                    let stem = name_buf.strip_suffix(".exe").unwrap_or(&name_buf);
+
+                    if entry.th32ProcessID == fg_pid && fg_proc.is_empty() {
+                        fg_proc.push_str(stem);
+                    }
+                    if target_map.contains_key(stem) && !matched_stems.contains(stem) {
+                        matched_stems.insert(stem.to_string());
+                    }
+
                     if Process32NextW(snap, &mut entry).is_err() {
                         break;
                     }
@@ -67,24 +99,16 @@ pub fn get_running_status(targets: &[String]) -> RunningStatus {
         }
     }
 
-    let mut running = Vec::new();
+    let mut running = Vec::with_capacity(matched_stems.len());
     for t in targets {
-        let low = t.trim().to_ascii_lowercase();
-        let stem = low.strip_suffix(".exe").unwrap_or(&low);
-        if !stem.is_empty() && all_names.contains(stem) {
-            running.push(t.clone());
+        let trimmed = t.trim();
+        if trimmed.is_empty() {
+            continue;
         }
-    }
-
-    let mut fg_proc = String::new();
-    unsafe {
-        let fg = GetForegroundWindow();
-        if !fg.0.is_null() {
-            let mut fg_pid: u32 = 0;
-            GetWindowThreadProcessId(fg, Some(&mut fg_pid));
-            if let Some(name) = pid_to_name.get(&fg_pid) {
-                fg_proc = name.clone();
-            }
+        let low = trimmed.to_ascii_lowercase();
+        let stem = low.strip_suffix(".exe").unwrap_or(&low);
+        if matched_stems.contains(stem) {
+            running.push(t.clone());
         }
     }
 

@@ -40,7 +40,8 @@ export const api = {
   setNoActivate: (enabled: boolean) => invoke<void>("set_no_activate", { enabled }),
   clampWindowPos: (x: number, y: number, w: number, h: number) =>
     invoke<[number, number]>("clamp_window_pos", { x, y, w, h }),
-  setDesktopLayer: (enabled: boolean) => invoke<void>("set_desktop_layer", { enabled }),
+  setDesktopLayer: (enabled: boolean, alwaysOnTop = false) =>
+    invoke<void>("set_desktop_layer", { enabled, alwaysOnTop }),
   setUserHidden: (hidden: boolean) => invoke<void>("set_user_hidden", { hidden }),
   tickDesktopVisibility: (alwaysOnTop: boolean) =>
     invoke<void>("tick_desktop_visibility", { alwaysOnTop }),

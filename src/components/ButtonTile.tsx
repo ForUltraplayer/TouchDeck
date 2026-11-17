@@ -136,7 +136,7 @@ function renderFallbackIcon(
   }
 }
 
-export const ButtonTile: React.FC<Props> = ({
+export const ButtonTile: React.FC<Props> = React.memo(({
   slotIndex,
   item,
   resolvedIconAbsPath,
@@ -422,4 +422,4 @@ export const ButtonTile: React.FC<Props> = ({
       )}
     </button>
   );
-};
+});

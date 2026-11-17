@@ -1,5 +1,8 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::Once;
+use std::thread;
+use std::time::Duration;
 use windows::core::{w, Interface, HSTRING};
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::Graphics::Gdi::{
@@ -19,7 +22,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 static DESKTOP_LAYER_ENABLED: AtomicBool = AtomicBool::new(false);
+static DESKTOP_ALWAYS_ON_TOP: AtomicBool = AtomicBool::new(false);
 static USER_HIDDEN: AtomicBool = AtomicBool::new(false);
+static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
+static MONITOR_STARTED: Once = Once::new();
 
 pub fn set_user_hidden(hidden: bool) {
     USER_HIDDEN.store(hidden, Ordering::SeqCst);
@@ -125,8 +131,28 @@ pub fn clamp_window_position(x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
     }
 }
 
-pub fn set_desktop_layer(hwnd_raw: isize, enabled: bool) {
+pub fn start_desktop_monitor() {
+    MONITOR_STARTED.call_once(|| {
+        thread::spawn(|| loop {
+            let enabled = DESKTOP_LAYER_ENABLED.load(Ordering::Relaxed);
+            let hidden = USER_HIDDEN.load(Ordering::Relaxed);
+            let hwnd = MAIN_HWND.load(Ordering::Relaxed);
+            if enabled && !hidden && hwnd != 0 {
+                let aot = DESKTOP_ALWAYS_ON_TOP.load(Ordering::Relaxed);
+                tick_desktop_visibility(hwnd, aot);
+                thread::sleep(Duration::from_millis(150));
+            } else {
+                thread::sleep(Duration::from_millis(400));
+            }
+        });
+    });
+}
+
+pub fn set_desktop_layer(hwnd_raw: isize, enabled: bool, always_on_top: bool) {
+    MAIN_HWND.store(hwnd_raw, Ordering::SeqCst);
+    DESKTOP_ALWAYS_ON_TOP.store(always_on_top, Ordering::SeqCst);
     DESKTOP_LAYER_ENABLED.store(enabled, Ordering::SeqCst);
+    start_desktop_monitor();
     unsafe {
         let hwnd = HWND(hwnd_raw as *mut _);
         if hwnd.0.is_null() || !IsWindow(hwnd).as_bool() {
@@ -161,13 +187,16 @@ unsafe fn is_window_behind(target: HWND, other: HWND) -> bool {
     false
 }
 
-unsafe fn get_class_name(hwnd: HWND) -> String {
+unsafe fn is_desktop_host_class(hwnd: HWND) -> bool {
+    const WORKER_W: [u16; 7] = [b'W' as u16, b'o' as u16, b'r' as u16, b'k' as u16, b'e' as u16, b'r' as u16, b'W' as u16];
+    const PROGMAN: [u16; 7] = [b'P' as u16, b'r' as u16, b'o' as u16, b'g' as u16, b'm' as u16, b'a' as u16, b'n' as u16];
     let mut buf = [0u16; 64];
     let len = GetClassNameW(hwnd, &mut buf);
     if len <= 0 {
-        return String::new();
+        return false;
     }
-    String::from_utf16_lossy(&buf[..len as usize])
+    let slice = &buf[..len as usize];
+    slice == WORKER_W || slice == PROGMAN
 }
 
 pub fn tick_desktop_visibility(hwnd_raw: isize, always_on_top: bool) {
@@ -187,13 +216,8 @@ pub fn tick_desktop_visibility(hwnd_raw: isize, always_on_top: bool) {
         }
 
         let fg = GetForegroundWindow();
-        if !fg.0.is_null() && fg != hwnd {
-            let cls = get_class_name(fg);
-            if cls == "WorkerW" || cls == "Progman" {
-                if is_window_behind(hwnd, fg) {
-                    need_raise = true;
-                }
-            }
+        if !fg.0.is_null() && fg != hwnd && is_desktop_host_class(fg) && is_window_behind(hwnd, fg) {
+            need_raise = true;
         }
 
         if need_raise {
