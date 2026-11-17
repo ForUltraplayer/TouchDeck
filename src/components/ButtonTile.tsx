@@ -54,6 +54,7 @@ interface Props {
   clockText: { time: string; date: string };
   onExecute: (item: ButtonItem) => void;
   onEdit: (slotIndex: number) => void;
+  onContextMenu: (slotIndex: number, e: React.MouseEvent) => void;
   onStartSlotDrag: (slotIndex: number, e: React.PointerEvent) => void;
 }
 
@@ -155,6 +156,7 @@ export const ButtonTile: React.FC<Props> = ({
   clockText,
   onExecute,
   onEdit,
+  onContextMenu,
   onStartSlotDrag,
 }) => {
   const iconSrc = assetUrl(resolvedIconAbsPath);
@@ -230,7 +232,8 @@ export const ButtonTile: React.FC<Props> = ({
       }}
       onContextMenu={(e) => {
         e.preventDefault();
-        onEdit(slotIndex);
+        e.stopPropagation();
+        onContextMenu(slotIndex, e);
       }}
       title={
         item.action.type === "media" && nowPlaying

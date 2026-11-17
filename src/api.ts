@@ -40,11 +40,17 @@ export const api = {
   setNoActivate: (enabled: boolean) => invoke<void>("set_no_activate", { enabled }),
   clampWindowPos: (x: number, y: number, w: number, h: number) =>
     invoke<[number, number]>("clamp_window_pos", { x, y, w, h }),
-  ensureDesktopVisible: () => invoke<void>("ensure_desktop_visible"),
+  setDesktopLayer: (enabled: boolean) => invoke<void>("set_desktop_layer", { enabled }),
+  setUserHidden: (hidden: boolean) => invoke<void>("set_user_hidden", { hidden }),
+  tickDesktopVisibility: (alwaysOnTop: boolean) =>
+    invoke<void>("tick_desktop_visibility", { alwaysOnTop }),
   setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart_cmd", { enabled }),
   openDataFolder: () => invoke<void>("open_data_folder"),
   enablePortableMode: () => invoke<string>("enable_portable_mode"),
   importLaunchersJson: (path: string) => invoke<number>("import_launchers_json", { path }),
+  exportConfigFile: (path: string, config: DeckConfig) =>
+    invoke<void>("export_config_file", { path, config }),
+  importConfigFile: (path: string) => invoke<DeckConfig>("import_config_file", { path }),
   checkUpdate: () => invoke<UpdateInfo>("check_update"),
   applyUpdate: (downloadUrl: string) => invoke<void>("apply_update", { downloadUrl }),
 };

@@ -261,9 +261,21 @@ fn clamp_window_pos(x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
 }
 
 #[tauri::command]
-fn ensure_desktop_visible(window: tauri::WebviewWindow) -> Result<(), String> {
+fn set_desktop_layer(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
-    win_window::ensure_desktop_visible(hwnd.0 as isize);
+    win_window::set_desktop_layer(hwnd.0 as isize, enabled);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_user_hidden(hidden: bool) {
+    win_window::set_user_hidden(hidden);
+}
+
+#[tauri::command]
+fn tick_desktop_visibility(window: tauri::WebviewWindow, always_on_top: bool) -> Result<(), String> {
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    win_window::tick_desktop_visibility(hwnd.0 as isize, always_on_top);
     Ok(())
 }
 
@@ -412,6 +424,28 @@ fn import_launchers_json(path: String) -> Result<usize, String> {
     Ok(imported)
 }
 
+#[tauri::command]
+fn export_config_file(path: String, config: DeckConfig) -> Result<(), String> {
+    save_config(&config)?;
+    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn import_config_file(path: String) -> Result<DeckConfig, String> {
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut cfg: DeckConfig = serde_json::from_str(&text)
+        .map_err(|e| format!("올바른 TouchDeck 설정 JSON이 아닙니다: {e}"))?;
+    if cfg.pages.is_empty() {
+        return Err("페이지 데이터가 없는 설정 파일입니다.".into());
+    }
+    if cfg.pages[0].id.trim().is_empty() {
+        cfg.pages[0].id = "page-1".into();
+    }
+    save_config(&cfg)?;
+    Ok(cfg)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -437,18 +471,21 @@ pub fn run() {
                 .tooltip("TouchDeck")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
+                        win_window::set_user_hidden(false);
                         if let Some(w) = app.get_webview_window("main") {
                             let _ = w.show();
                             let _ = w.emit("tray-show", ());
                         }
                     }
                     "hide" => {
+                        win_window::set_user_hidden(true);
                         if let Some(w) = app.get_webview_window("main") {
                             let _ = w.emit("tray-hide", ());
                             let _ = w.hide();
                         }
                     }
                     "settings" => {
+                        win_window::set_user_hidden(false);
                         if let Some(w) = app.get_webview_window("main") {
                             let _ = w.show();
                             let _ = w.set_focus();
@@ -467,6 +504,7 @@ pub fn run() {
                         ..
                     } = event
                     {
+                        win_window::set_user_hidden(false);
                         if let Some(w) = tray.app_handle().get_webview_window("main") {
                             let _ = w.show();
                             let _ = w.emit("tray-show", ());
@@ -497,11 +535,15 @@ pub fn run() {
             get_running_status,
             set_no_activate,
             clamp_window_pos,
-            ensure_desktop_visible,
+            set_desktop_layer,
+            set_user_hidden,
+            tick_desktop_visibility,
             set_autostart_cmd,
             open_data_folder,
             enable_portable_mode,
             import_launchers_json,
+            export_config_file,
+            import_config_file,
             check_update,
             apply_update
         ])

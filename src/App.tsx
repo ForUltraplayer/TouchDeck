@@ -6,11 +6,14 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ChevronLeft,
   ChevronRight,
+  Copy,
   Lock,
   Minus,
   Package,
   Pencil,
+  Play,
   Settings,
+  Trash2,
   Unlock,
 } from "lucide-react";
 import { api, assetUrl, hexToRgba } from "./api";
@@ -51,6 +54,7 @@ export const App: React.FC = () => {
   const [editMode, setEditMode] = useState(false);
   const [dockOpen, setDockOpen] = useState(false);
   const [editingSlot, setEditingSlot] = useState<number | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ slotIndex: number; x: number; y: number } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dropHoverSlot, setDropHoverSlot] = useState<number | null>(null);
   const [vaultHover, setVaultHover] = useState(false);
@@ -198,16 +202,20 @@ export const App: React.FC = () => {
     return () => clearInterval(timer);
   }, [pageIndex, config?.pages]);
 
-  // Win+D defense when desktopLayer is enabled
+  // Win+D defense when desktopLayer is enabled (Progman owner + 150ms WorkerW Z-order guard)
   useEffect(() => {
-    if (!config?.window.desktopLayer) return;
+    if (!config) return;
+    const enabled = config.window.desktopLayer;
+    api.setDesktopLayer(enabled).catch(() => {});
+    if (!enabled) return;
+    const aot = config.window.alwaysOnTop;
     const timer = setInterval(() => {
       if (!userHiddenRef.current) {
-        api.ensureDesktopVisible().catch(() => {});
+        api.tickDesktopVisibility(aot).catch(() => {});
       }
-    }, 1500);
+    }, 150);
     return () => clearInterval(timer);
-  }, [config?.window.desktopLayer]);
+  }, [config !== null, config?.window.desktopLayer, config?.window.alwaysOnTop]);
 
   // Toggle WS_EX_NOACTIVATE so touching buttons doesn't steal focus from active apps
   const modalOpen = settingsOpen || editingSlot !== null;
@@ -536,6 +544,67 @@ export const App: React.FC = () => {
     persistConfig({ ...config, pages: nextPages });
     setEditingSlot(null);
   };
+
+  const handleDuplicateSlot = (slotIdx: number) => {
+    if (!config || !currentPage) return;
+    const src = currentPage.slots[String(slotIdx)];
+    if (!src) return;
+    const total = config.grid.columns * config.grid.rows;
+    let freeSlot: number | null = null;
+    for (let i = 0; i < total; i++) {
+      if (!currentPage.slots[String(i)]) {
+        freeSlot = i;
+        break;
+      }
+    }
+    if (freeSlot === null) {
+      showToast("현재 페이지에 빈 칸이 없습니다.");
+      return;
+    }
+    const copyItem: ButtonItem = {
+      ...structuredClone(src),
+      id: `btn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    };
+    const nextSlots = { ...currentPage.slots, [String(freeSlot)]: copyItem };
+    const nextPages = config.pages.map((p, idx) =>
+      idx === pageIndex ? { ...p, slots: nextSlots } : p
+    );
+    persistConfig({ ...config, pages: nextPages });
+    showToast(`"${src.label}" 복제됨`);
+  };
+
+  const handleOpenContextMenu = (slotIdx: number, e: React.MouseEvent) => {
+    const menuW = 176;
+    const menuH = 204;
+    const x = Math.max(8, Math.min(e.clientX, window.innerWidth - menuW - 8));
+    const y = Math.max(8, Math.min(e.clientY, window.innerHeight - menuH - 8));
+    setContextMenu({ slotIndex: slotIdx, x, y });
+  };
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const onPointerDown = (ev: PointerEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (target?.closest(".tile-context-menu")) return;
+      setContextMenu(null);
+    };
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") setContextMenu(null);
+    };
+    const onBlur = () => setContextMenu(null);
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [contextMenu]);
+
+  useEffect(() => {
+    setContextMenu(null);
+  }, [pageIndex, modalOpen]);
 
   const handleMoveToVault = (slotIdx: number) => {
     const cur = configRef.current;
@@ -955,6 +1024,7 @@ export const App: React.FC = () => {
             className="hdr-btn"
             onClick={() => {
               userHiddenRef.current = true;
+              api.setUserHidden(true).catch(() => {});
               getCurrentWindow().hide();
             }}
             title="트레이로 숨기기"
@@ -1020,6 +1090,7 @@ export const App: React.FC = () => {
                   clockText={clockText}
                   onExecute={handleExecute}
                   onEdit={(s) => setEditingSlot(s)}
+                  onContextMenu={handleOpenContextMenu}
                   onStartSlotDrag={handleStartSlotDrag}
                 />
               );
@@ -1075,6 +1146,72 @@ export const App: React.FC = () => {
           />
         )}
       </div>
+
+      {contextMenu && currentPage.slots[String(contextMenu.slotIndex)] && (() => {
+        const ctxSlot = contextMenu.slotIndex;
+        const ctxItem = currentPage.slots[String(ctxSlot)];
+        return (
+          <div
+            className="tile-context-menu"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            {ctxItem.action.type !== "widget" && (
+              <button
+                type="button"
+                className="ctx-menu-item"
+                onClick={() => {
+                  setContextMenu(null);
+                  handleExecute(ctxItem);
+                }}
+              >
+                <Play size={13} /> 실행
+              </button>
+            )}
+            <button
+              type="button"
+              className="ctx-menu-item"
+              onClick={() => {
+                setContextMenu(null);
+                setEditingSlot(ctxSlot);
+              }}
+            >
+              <Pencil size={13} /> 편집
+            </button>
+            <button
+              type="button"
+              className="ctx-menu-item"
+              onClick={() => {
+                setContextMenu(null);
+                handleDuplicateSlot(ctxSlot);
+              }}
+            >
+              <Copy size={13} /> 복제
+            </button>
+            <button
+              type="button"
+              className="ctx-menu-item"
+              onClick={() => {
+                setContextMenu(null);
+                handleMoveToVault(ctxSlot);
+              }}
+            >
+              <Package size={13} /> 보관함으로 이동
+            </button>
+            <div className="ctx-menu-sep" />
+            <button
+              type="button"
+              className="ctx-menu-item ctx-menu-item-danger"
+              onClick={() => {
+                setContextMenu(null);
+                handleDeleteSlot(ctxSlot);
+              }}
+            >
+              <Trash2 size={13} /> 삭제
+            </button>
+          </div>
+        );
+      })()}
 
       {toast && <div className="toast-pill">{toast}</div>}
 

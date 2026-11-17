@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use windows::core::{Interface, HSTRING};
+use std::sync::atomic::{AtomicBool, Ordering};
+use windows::core::{w, Interface, HSTRING};
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY, MONITOR_DEFAULTTONULL,
@@ -10,10 +11,19 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongW, IsIconic, IsWindow, IsWindowVisible, SetWindowLongW, SetWindowPos, ShowWindow,
-    GWL_EXSTYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SW_SHOWNOACTIVATE, WS_EX_NOACTIVATE,
+    FindWindowW, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, IsIconic,
+    IsWindow, IsWindowVisible, SetWindowLongPtrW, SetWindowLongW, SetWindowPos, ShowWindow,
+    GWLP_HWNDPARENT, GWL_EXSTYLE, GW_HWNDPREV, HWND_NOTOPMOST, HWND_TOPMOST, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
+    WS_EX_NOACTIVATE,
 };
+
+static DESKTOP_LAYER_ENABLED: AtomicBool = AtomicBool::new(false);
+static USER_HIDDEN: AtomicBool = AtomicBool::new(false);
+
+pub fn set_user_hidden(hidden: bool) {
+    USER_HIDDEN.store(hidden, Ordering::SeqCst);
+}
 
 fn startup_shortcut_path() -> Result<PathBuf, String> {
     let appdata = std::env::var("APPDATA").map_err(|_| "APPDATA not found".to_string())?;
@@ -115,14 +125,98 @@ pub fn clamp_window_position(x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
     }
 }
 
-pub fn ensure_desktop_visible(hwnd_raw: isize) {
+pub fn set_desktop_layer(hwnd_raw: isize, enabled: bool) {
+    DESKTOP_LAYER_ENABLED.store(enabled, Ordering::SeqCst);
     unsafe {
         let hwnd = HWND(hwnd_raw as *mut _);
         if hwnd.0.is_null() || !IsWindow(hwnd).as_bool() {
             return;
         }
+        if enabled {
+            if let Ok(progman) = FindWindowW(w!("Progman"), None) {
+                if !progman.0.is_null() {
+                    SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, progman.0 as isize);
+                }
+            }
+        } else {
+            SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
+        }
+    }
+}
+
+unsafe fn is_window_behind(target: HWND, other: HWND) -> bool {
+    let mut cur = target;
+    for _ in 0..256 {
+        let Ok(prev) = GetWindow(cur, GW_HWNDPREV) else {
+            break;
+        };
+        if prev.0.is_null() {
+            break;
+        }
+        if prev == other {
+            return true;
+        }
+        cur = prev;
+    }
+    false
+}
+
+unsafe fn get_class_name(hwnd: HWND) -> String {
+    let mut buf = [0u16; 64];
+    let len = GetClassNameW(hwnd, &mut buf);
+    if len <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..len as usize])
+}
+
+pub fn tick_desktop_visibility(hwnd_raw: isize, always_on_top: bool) {
+    if !DESKTOP_LAYER_ENABLED.load(Ordering::SeqCst) || USER_HIDDEN.load(Ordering::SeqCst) {
+        return;
+    }
+    unsafe {
+        let hwnd = HWND(hwnd_raw as *mut _);
+        if hwnd.0.is_null() || !IsWindow(hwnd).as_bool() {
+            return;
+        }
+
+        let mut need_raise = false;
         if IsIconic(hwnd).as_bool() || !IsWindowVisible(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            need_raise = true;
+        }
+
+        let fg = GetForegroundWindow();
+        if !fg.0.is_null() && fg != hwnd {
+            let cls = get_class_name(fg);
+            if cls == "WorkerW" || cls == "Progman" {
+                if is_window_behind(hwnd, fg) {
+                    need_raise = true;
+                }
+            }
+        }
+
+        if need_raise {
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            if !always_on_top {
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_NOTOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            }
         }
     }
 }

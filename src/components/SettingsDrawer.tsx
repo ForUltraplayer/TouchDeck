@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Download, FolderOpen, Image as ImageIcon, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { Download, FolderOpen, Image as ImageIcon, Plus, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import { api } from "../api";
 import type { DeckConfig, DiscordState, EnvInfo, UpdateInfo } from "../types";
 
@@ -103,6 +103,38 @@ export const SettingsDrawer: React.FC<Props> = ({
       onReloadFromDisk();
     } catch (e) {
       setStatusMsg(`가져오기 실패: ${String(e)}`);
+    }
+  };
+
+  const handleExportConfig = async () => {
+    const selected = await saveDialog({
+      defaultPath: "touchdeck-backup.json",
+      filters: [{ name: "TouchDeck 설정 백업", extensions: ["json"] }],
+    });
+    if (!selected) return;
+    try {
+      await api.exportConfigFile(selected, config);
+      setStatusMsg(`설정 백업을 저장했습니다: ${selected}`);
+    } catch (e) {
+      setStatusMsg(`백업 저장 실패: ${String(e)}`);
+    }
+  };
+
+  const handleImportConfig = async () => {
+    const selected = await openDialog({
+      multiple: false,
+      filters: [{ name: "TouchDeck 설정 백업", extensions: ["json"] }],
+    });
+    if (!selected || typeof selected !== "string") return;
+    try {
+      const restored = await api.importConfigFile(selected);
+      if (currentPageIndex >= restored.pages.length) {
+        onSwitchPage(0);
+      }
+      setStatusMsg("설정 백업을 복원했습니다.");
+      onReloadFromDisk();
+    } catch (e) {
+      setStatusMsg(`설정 복원 실패: ${String(e)}`);
     }
   };
 
@@ -522,6 +554,12 @@ export const SettingsDrawer: React.FC<Props> = ({
                 포터블 모드 전환 (exe 옆 data/)
               </button>
             )}
+            <button type="button" className="btn-secondary" onClick={handleExportConfig}>
+              <Upload size={14} /> 설정 내보내기 (.json)
+            </button>
+            <button type="button" className="btn-secondary" onClick={handleImportConfig}>
+              <Download size={14} /> 설정 가져오기 (.json)
+            </button>
             <button type="button" className="btn-secondary" onClick={handleImportLaunchers}>
               <Download size={14} /> launchers.json 가져오기
             </button>
