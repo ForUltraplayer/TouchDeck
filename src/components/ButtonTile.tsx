@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useCallback, useEffect, useRef } from "react";
 import {
   AppWindow,
   ArrowRightCircle,
@@ -53,6 +53,7 @@ interface Props {
   systemStats: SystemStats | null;
   clockText: { time: string; date: string };
   onExecute: (item: ButtonItem) => void;
+  onVolumeStep: (command: "up" | "down", step: number) => void;
   onEdit: (slotIndex: number) => void;
   onContextMenu: (slotIndex: number, e: React.MouseEvent) => void;
   onStartSlotDrag: (slotIndex: number, e: React.PointerEvent) => void;
@@ -155,10 +156,29 @@ export const ButtonTile: React.FC<Props> = React.memo(({
   systemStats,
   clockText,
   onExecute,
+  onVolumeStep,
   onEdit,
   onContextMenu,
   onStartSlotDrag,
 }) => {
+  const volHoldRef = useRef<{
+    holdTimer: number | null;
+    repeatTimer: number | null;
+    startX: number;
+    startY: number;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
+
+  const clearVolHold = useCallback(() => {
+    const h = volHoldRef.current;
+    if (!h) return;
+    if (h.holdTimer !== null) window.clearTimeout(h.holdTimer);
+    if (h.repeatTimer !== null) window.clearInterval(h.repeatTimer);
+    volHoldRef.current = null;
+  }, []);
+
+  useEffect(() => clearVolHold, [clearVolHold]);
+
   const iconSrc = assetUrl(resolvedIconAbsPath);
   const iconBoxSize = Math.round(cellSize * 0.48);
 
@@ -211,6 +231,11 @@ export const ButtonTile: React.FC<Props> = React.memo(({
       : item.fontSize || 13;
 
   const isWidget = item.action.type === "widget";
+  const isSysVol = item.action.type === "volume" && item.action.target !== "mic";
+  const volCommand =
+    isSysVol && item.action.type === "volume" && (item.action.command === "up" || item.action.command === "down")
+      ? item.action.command
+      : null;
 
   return (
     <button
@@ -220,12 +245,46 @@ export const ButtonTile: React.FC<Props> = React.memo(({
         editMode ? "tile-edit-wiggle" : ""
       } ${isDropHover ? "tile-drop-hover" : ""} ${isDraggingSource ? "tile-dragging-src" : ""}`}
       style={tileStyle}
+      onWheel={(e) => {
+        if (editMode || !isSysVol || e.deltaY === 0) return;
+        e.stopPropagation();
+        onVolumeStep(e.deltaY < 0 ? "up" : "down", 2);
+      }}
       onPointerDown={(e) => {
+        suppressClickRef.current = false;
         if (editMode && e.button === 0) {
           onStartSlotDrag(slotIndex, e);
+          return;
+        }
+        if (!editMode && volCommand && e.button === 0) {
+          clearVolHold();
+          const startX = e.clientX;
+          const startY = e.clientY;
+          const holdTimer = window.setTimeout(() => {
+            if (!volHoldRef.current) return;
+            suppressClickRef.current = true;
+            onVolumeStep(volCommand, 2);
+            volHoldRef.current.repeatTimer = window.setInterval(() => {
+              onVolumeStep(volCommand, 2);
+            }, 75);
+          }, 320);
+          volHoldRef.current = { holdTimer, repeatTimer: null, startX, startY };
         }
       }}
+      onPointerMove={(e) => {
+        const h = volHoldRef.current;
+        if (h && Math.hypot(e.clientX - h.startX, e.clientY - h.startY) > 10) {
+          clearVolHold();
+        }
+      }}
+      onPointerUp={clearVolHold}
+      onPointerCancel={clearVolHold}
+      onPointerLeave={clearVolHold}
       onClick={() => {
+        if (suppressClickRef.current) {
+          suppressClickRef.current = false;
+          return;
+        }
         if (!editMode) {
           onExecute(item);
         }

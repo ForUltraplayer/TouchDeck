@@ -562,6 +562,43 @@ export const App: React.FC = () => {
 
   const currentPage = config?.pages[pageIndex] ?? config?.pages[0];
 
+  const volInFlightRef = useRef(false);
+  const pendingVolDeltaRef = useRef(0);
+
+  const flushVolumeDelta = useCallback(async () => {
+    if (volInFlightRef.current) return;
+    const delta = pendingVolDeltaRef.current;
+    if (delta === 0) return;
+    pendingVolDeltaRef.current = 0;
+    volInFlightRef.current = true;
+    try {
+      const res = await api.executeAction({
+        type: "volume",
+        command: delta > 0 ? "up" : "down",
+        step: Math.min(25, Math.abs(delta)),
+        target: "speaker",
+      });
+      if (res.volume) {
+        setVolumeState(res.volume);
+      }
+    } catch {
+      // Ignore transient errors during rapid wheel or hold adjustments
+    } finally {
+      volInFlightRef.current = false;
+      if (pendingVolDeltaRef.current !== 0) {
+        void flushVolumeDelta();
+      }
+    }
+  }, []);
+
+  const handleVolumeStep = useCallback(
+    (command: "up" | "down", step: number) => {
+      pendingVolDeltaRef.current += command === "up" ? step : -step;
+      void flushVolumeDelta();
+    },
+    [flushVolumeDelta]
+  );
+
   const handleExecute = useCallback(
     async (item: ButtonItem) => {
       if (Date.now() < suppressClickUntilRef.current) return;
@@ -1159,6 +1196,7 @@ export const App: React.FC = () => {
                   systemStats={systemStats}
                   clockText={clockText}
                   onExecute={handleExecute}
+                  onVolumeStep={handleVolumeStep}
                   onEdit={handleEditSlot}
                   onContextMenu={handleOpenContextMenu}
                   onStartSlotDrag={handleStartSlotDrag}

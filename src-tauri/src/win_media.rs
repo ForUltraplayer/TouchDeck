@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::{Interface, GUID, HRESULT, PCWSTR};
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSessionManager,
@@ -89,6 +90,8 @@ fn with_endpoint_volume<T, F: FnOnce(&IAudioEndpointVolume) -> Result<T, String>
     }
 }
 
+static CACHED_MIC_MUTED: AtomicBool = AtomicBool::new(false);
+
 pub fn get_volume_state() -> Result<VolumeState, String> {
     let _com = ComGuard::new();
     unsafe {
@@ -118,6 +121,7 @@ pub fn get_volume_state() -> Result<VolumeState, String> {
             .and_then(|v| v.GetMute().ok())
             .map(|b| b.as_bool())
             .unwrap_or(false);
+        CACHED_MIC_MUTED.store(mic_muted, Ordering::Relaxed);
 
         Ok(VolumeState {
             level,
@@ -129,6 +133,7 @@ pub fn get_volume_state() -> Result<VolumeState, String> {
 
 pub fn adjust_volume(command: &str, step: u8, target: &str) -> Result<VolumeState, String> {
     if target.eq_ignore_ascii_case("mic") {
+        let mut mic_muted_out = CACHED_MIC_MUTED.load(Ordering::Relaxed);
         with_endpoint_volume(true, |vol| unsafe {
             let mut muted = vol.GetMute().map_err(|e| e.to_string())?.as_bool();
             if command == "mute" {
@@ -136,30 +141,36 @@ pub fn adjust_volume(command: &str, step: u8, target: &str) -> Result<VolumeStat
                 vol.SetMute(muted, std::ptr::null())
                     .map_err(|e| e.to_string())?;
             }
+            mic_muted_out = muted;
             Ok(())
         })?;
-        return get_volume_state();
+        CACHED_MIC_MUTED.store(mic_muted_out, Ordering::Relaxed);
+        let mut render_state = get_volume_state()?;
+        render_state.mic_muted = mic_muted_out;
+        return Ok(render_state);
     }
 
-    with_endpoint_volume(false, |vol| unsafe {
+    let (level, muted) = with_endpoint_volume(false, |vol| unsafe {
         let cur = vol
             .GetMasterVolumeLevelScalar()
             .map_err(|e| e.to_string())?;
         let mut muted = vol.GetMute().map_err(|e| e.to_string())?.as_bool();
-        let delta = (step as f32) / 100.0;
+        let delta = (step.min(100) as f32) / 100.0;
+        let mut next = cur;
 
         match command {
             "up" => {
-                let next = (cur + delta).clamp(0.0, 1.0);
+                next = (cur + delta).clamp(0.0, 1.0);
                 vol.SetMasterVolumeLevelScalar(next, std::ptr::null())
                     .map_err(|e| e.to_string())?;
                 if muted {
+                    muted = false;
                     vol.SetMute(false, std::ptr::null())
                         .map_err(|e| e.to_string())?;
                 }
             }
             "down" => {
-                let next = (cur - delta).clamp(0.0, 1.0);
+                next = (cur - delta).clamp(0.0, 1.0);
                 vol.SetMasterVolumeLevelScalar(next, std::ptr::null())
                     .map_err(|e| e.to_string())?;
             }
@@ -170,10 +181,16 @@ pub fn adjust_volume(command: &str, step: u8, target: &str) -> Result<VolumeStat
             }
             _ => return Err(format!("알 수 없는 볼륨 명령: {command}")),
         }
-        Ok(())
+
+        let level = (next * 100.0).round().clamp(0.0, 100.0) as u8;
+        Ok((level, muted))
     })?;
 
-    get_volume_state()
+    Ok(VolumeState {
+        level,
+        muted,
+        mic_muted: CACHED_MIC_MUTED.load(Ordering::Relaxed),
+    })
 }
 
 pub fn list_audio_devices() -> Result<Vec<AudioDeviceInfo>, String> {
