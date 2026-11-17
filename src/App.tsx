@@ -8,17 +8,20 @@ import {
   ChevronRight,
   Lock,
   Minus,
+  Package,
   Pencil,
   Settings,
   Unlock,
 } from "lucide-react";
 import { api, assetUrl, hexToRgba } from "./api";
+import { ButtonDock } from "./components/ButtonDock";
 import { ButtonEditorModal } from "./components/ButtonEditorModal";
 import { ButtonTile } from "./components/ButtonTile";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import type {
   ButtonItem,
   DeckConfig,
+  DiscordState,
   NowPlayingInfo,
   RunningStatus,
   SystemStats,
@@ -29,6 +32,7 @@ const HEADER_H = 34;
 const FOOTER_H = 38;
 const PAD_X = 14;
 const PAD_Y = 10;
+const DOCK_W = 256;
 
 function formatClock(): { time: string; date: string } {
   const now = new Date();
@@ -44,18 +48,22 @@ export const App: React.FC = () => {
   const [config, setConfig] = useState<DeckConfig | null>(null);
   const [pageIndex, setPageIndex] = useState(0);
   const [editMode, setEditMode] = useState(false);
+  const [dockOpen, setDockOpen] = useState(false);
   const [editingSlot, setEditingSlot] = useState<number | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dropHoverSlot, setDropHoverSlot] = useState<number | null>(null);
+  const [vaultHover, setVaultHover] = useState(false);
   const [swipeOffset, setSwipeOffset] = useState(0);
   const [dragSwap, setDragSwap] = useState<{
-    fromSlot: number;
+    fromSlot: number | null;
+    label: string;
     overSlot: number | null;
     clientX: number;
     clientY: number;
   } | null>(null);
   const [assetMap, setAssetMap] = useState<Record<string, string>>({});
   const [volumeState, setVolumeState] = useState<VolumeState | null>(null);
+  const [discordState, setDiscordState] = useState<DiscordState | null>(null);
   const [nowPlaying, setNowPlaying] = useState<NowPlayingInfo | null>(null);
   const [systemStats, setSystemStats] = useState<SystemStats | null>(null);
   const [runningStatus, setRunningStatus] = useState<RunningStatus | null>(null);
@@ -69,10 +77,19 @@ export const App: React.FC = () => {
   const userHiddenRef = useRef(false);
   const slotDragPendingRef = useRef<{
     fromSlot: number;
+    label: string;
     startX: number;
     startY: number;
     active: boolean;
   } | null>(null);
+  const dockDragPendingRef = useRef<{
+    item: ButtonItem;
+    removeVaultId: string | null;
+    startX: number;
+    startY: number;
+    active: boolean;
+  } | null>(null);
+
   const configRef = useRef<DeckConfig | null>(null);
   configRef.current = config;
   const pageIndexRef = useRef(pageIndex);
@@ -88,12 +105,13 @@ export const App: React.FC = () => {
     setConfig(loaded);
   }, []);
 
-  // Initial config load
+  // Initial config and Discord state load
   useEffect(() => {
     reloadConfig().catch((e) => showToast(`설정 로드 오류: ${String(e)}`));
+    api.getDiscordState().then(setDiscordState).catch(() => {});
   }, [reloadConfig, showToast]);
 
-  // Listen tray events
+  // Listen tray and Discord push events
   useEffect(() => {
     const u1 = listen("open-settings", () => {
       userHiddenRef.current = false;
@@ -105,10 +123,14 @@ export const App: React.FC = () => {
     const u3 = listen("tray-hide", () => {
       userHiddenRef.current = true;
     });
+    const u4 = listen<DiscordState>("discord-state", (e) => {
+      setDiscordState(e.payload);
+    });
     return () => {
       u1.then((fn) => fn());
       u2.then((fn) => fn());
       u3.then((fn) => fn());
+      u4.then((fn) => fn());
     };
   }, []);
 
@@ -128,7 +150,8 @@ export const App: React.FC = () => {
 
       for (const b of items) {
         if (b.action.type === "app") {
-          const pn = b.action.procName || b.action.exe.split(/[\\/]/).pop()?.replace(/\.exe$/i, "") || "";
+          const pn =
+            b.action.procName || b.action.exe.split(/[\\/]/).pop()?.replace(/\.exe$/i, "") || "";
           if (pn) procs.push(pn);
         } else if (b.action.type === "volume") {
           needVol = true;
@@ -167,9 +190,9 @@ export const App: React.FC = () => {
   const modalOpen = settingsOpen || editingSlot !== null;
   useEffect(() => {
     if (!config) return;
-    const wantNoActivate = !modalOpen && !editMode;
+    const wantNoActivate = !modalOpen && !editMode && !dockOpen;
     api.setNoActivate(wantNoActivate).catch(() => {});
-  }, [config !== null, modalOpen, editMode]);
+  }, [config !== null, modalOpen, editMode, dockOpen]);
 
   // Resolve relative asset paths -> absolute paths for convertFileSrc
   useEffect(() => {
@@ -180,6 +203,9 @@ export const App: React.FC = () => {
       for (const b of Object.values(p.slots)) {
         if (b.iconPath) rels.add(b.iconPath);
       }
+    }
+    for (const v of config.vault ?? []) {
+      if (v.iconPath) rels.add(v.iconPath);
     }
     const missing = Array.from(rels).filter((r) => !(r in assetMap));
     if (missing.length === 0) return;
@@ -222,7 +248,7 @@ export const App: React.FC = () => {
     win.setAlwaysOnTop(config.window.alwaysOnTop).catch(() => {});
   }, [config]);
 
-  // Sync window size dynamically with grid size.
+  // Sync window size dynamically with grid size + dock width.
   // Never resize while settings/editor modal is open so sliders do not jitter under the cursor.
   const gridCols = config?.grid.columns;
   const gridRows = config?.grid.rows;
@@ -245,13 +271,14 @@ export const App: React.FC = () => {
       return;
     }
 
+    const extraDockW = dockOpen ? DOCK_W : 0;
     const gridW = gridCols * gridCellSize + Math.max(0, gridCols - 1) * gridGap + PAD_X * 2;
     const gridH =
       gridRows * gridCellSize + Math.max(0, gridRows - 1) * gridGap + HEADER_H + FOOTER_H + PAD_Y * 2;
-    const w = modalOpen ? Math.max(gridW, 600) : gridW;
+    const w = modalOpen ? Math.max(gridW + extraDockW, 600) : gridW + extraDockW;
     const h = modalOpen ? Math.max(gridH, 680) : gridH;
     getCurrentWindow().setSize(new LogicalSize(w, h)).catch(() => {});
-  }, [gridCols, gridRows, gridCellSize, gridGap, modalOpen]);
+  }, [gridCols, gridRows, gridCellSize, gridGap, modalOpen, dockOpen]);
 
   // Sync alwaysOnTop changes
   useEffect(() => {
@@ -304,6 +331,13 @@ export const App: React.FC = () => {
       }
     }
     return null;
+  }, []);
+
+  const isOverVaultDrop = useCallback((cx: number, cy: number): boolean => {
+    const el = document.querySelector<HTMLElement>('[data-vault-drop="true"]');
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    return cx >= rect.left && cx <= rect.right && cy >= rect.top && cy <= rect.bottom;
   }, []);
 
   // Find slot index under physical position from Tauri drag-drop
@@ -480,6 +514,78 @@ export const App: React.FC = () => {
     setEditingSlot(null);
   };
 
+  const handleMoveToVault = (slotIdx: number) => {
+    const cur = configRef.current;
+    if (!cur) return;
+    const curP = cur.pages[pageIndexRef.current];
+    if (!curP) return;
+    const target = curP.slots[String(slotIdx)];
+    if (!target) return;
+
+    const nextSlots = { ...curP.slots };
+    delete nextSlots[String(slotIdx)];
+    const nextPages = cur.pages.map((p, idx) =>
+      idx === pageIndexRef.current ? { ...p, slots: nextSlots } : p
+    );
+    const nextVault = [...(cur.vault ?? []), target];
+    persistConfig({ ...cur, pages: nextPages, vault: nextVault });
+    setEditingSlot(null);
+    setDockOpen(true);
+    showToast(`"${target.label}" 버튼을 보관함에 넣었습니다.`);
+  };
+
+  const handleRemoveFromVault = (id: string) => {
+    if (!config) return;
+    const nextVault = (config.vault ?? []).filter((v) => v.id !== id);
+    persistConfig({ ...config, vault: nextVault });
+  };
+
+  const placeDockItemAtSlot = (item: ButtonItem, targetSlot: number, removeVaultId: string | null) => {
+    const cur = configRef.current;
+    if (!cur) return;
+    const curP = cur.pages[pageIndexRef.current];
+    if (!curP) return;
+
+    const nextSlots = { ...curP.slots };
+    const displaced = nextSlots[String(targetSlot)];
+    nextSlots[String(targetSlot)] = item;
+
+    let nextVault = cur.vault ?? [];
+    if (removeVaultId) {
+      nextVault = nextVault.filter((v) => v.id !== removeVaultId);
+    }
+    if (displaced) {
+      nextVault = [...nextVault, displaced];
+    }
+
+    const nextPages = cur.pages.map((p, idx) =>
+      idx === pageIndexRef.current ? { ...p, slots: nextSlots } : p
+    );
+    persistConfig({ ...cur, pages: nextPages, vault: nextVault });
+    showToast(
+      displaced
+        ? `"${item.label}" 배치됨 (기존 "${displaced.label}" 보관함 이동)`
+        : `"${item.label}" 추가됨`
+    );
+  };
+
+  const handleQuickInsertFromDock = (item: ButtonItem, removeVaultId?: string) => {
+    if (!config || !currentPage) return;
+    const total = config.grid.columns * config.grid.rows;
+    let freeSlot: number | null = null;
+    for (let i = 0; i < total; i++) {
+      if (!currentPage.slots[String(i)]) {
+        freeSlot = i;
+        break;
+      }
+    }
+    if (freeSlot === null) {
+      showToast("현재 페이지에 빈 칸이 없습니다.");
+      return;
+    }
+    placeDockItemAtSlot(item, freeSlot, removeVaultId ?? null);
+  };
+
   const handleTransferToPage = (slotIdx: number, targetPageIdx: number, move: boolean) => {
     if (!config || !currentPage || targetPageIdx === pageIndex) return;
     const srcItem = currentPage.slots[String(slotIdx)];
@@ -539,15 +645,35 @@ export const App: React.FC = () => {
 
   const handleSwapSlotRef = useRef(handleSwapSlot);
   handleSwapSlotRef.current = handleSwapSlot;
+  const handleMoveToVaultRef = useRef(handleMoveToVault);
+  handleMoveToVaultRef.current = handleMoveToVault;
+  const placeDockItemRef = useRef(placeDockItemAtSlot);
+  placeDockItemRef.current = placeDockItemAtSlot;
 
   const handleStartSlotDrag = useCallback((slotIdx: number, e: React.PointerEvent) => {
+    const curP = configRef.current?.pages[pageIndexRef.current];
+    const lbl = curP?.slots[String(slotIdx)]?.label ?? "";
     slotDragPendingRef.current = {
       fromSlot: slotIdx,
+      label: lbl,
       startX: e.clientX,
       startY: e.clientY,
       active: false,
     };
   }, []);
+
+  const handleStartDockDrag = useCallback(
+    (item: ButtonItem, removeVaultId: string | null, e: React.PointerEvent) => {
+      dockDragPendingRef.current = {
+        item,
+        removeVaultId,
+        startX: e.clientX,
+        startY: e.clientY,
+        active: false,
+      };
+    },
+    []
+  );
 
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
@@ -558,9 +684,31 @@ export const App: React.FC = () => {
           p.active = true;
         }
         if (p.active) {
-          const overSlot = findSlotAtClientPos(e.clientX, e.clientY);
+          const overVault = isOverVaultDrop(e.clientX, e.clientY);
+          setVaultHover(overVault);
+          const overSlot = overVault ? null : findSlotAtClientPos(e.clientX, e.clientY);
           setDragSwap({
             fromSlot: p.fromSlot,
+            label: p.label,
+            overSlot,
+            clientX: e.clientX,
+            clientY: e.clientY,
+          });
+        }
+        return;
+      }
+
+      const d = dockDragPendingRef.current;
+      if (d) {
+        const dist = Math.hypot(e.clientX - d.startX, e.clientY - d.startY);
+        if (!d.active && dist >= 8) {
+          d.active = true;
+        }
+        if (d.active) {
+          const overSlot = findSlotAtClientPos(e.clientX, e.clientY);
+          setDragSwap({
+            fromSlot: null,
+            label: d.item.label,
             overSlot,
             clientX: e.clientX,
             clientY: e.clientY,
@@ -587,14 +735,32 @@ export const App: React.FC = () => {
       if (p) {
         slotDragPendingRef.current = null;
         setDragSwap(null);
+        setVaultHover(false);
 
         if (p.active) {
+          if (isOverVaultDrop(e.clientX, e.clientY)) {
+            handleMoveToVaultRef.current(p.fromSlot);
+            return;
+          }
           const overSlot = findSlotAtClientPos(e.clientX, e.clientY);
           if (overSlot !== null && overSlot !== p.fromSlot) {
             handleSwapSlotRef.current(p.fromSlot, overSlot);
           }
         } else {
           setEditingSlot(p.fromSlot);
+        }
+        return;
+      }
+
+      const d = dockDragPendingRef.current;
+      if (d) {
+        dockDragPendingRef.current = null;
+        setDragSwap(null);
+        if (d.active) {
+          const overSlot = findSlotAtClientPos(e.clientX, e.clientY);
+          if (overSlot !== null) {
+            placeDockItemRef.current(d.item, overSlot, d.removeVaultId);
+          }
         }
         return;
       }
@@ -625,7 +791,7 @@ export const App: React.FC = () => {
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
     };
-  }, [findSlotAtClientPos]);
+  }, [findSlotAtClientPos, isOverVaultDrop]);
 
   const panelBgStyle = useMemo<React.CSSProperties>(() => {
     if (!config) return {};
@@ -697,7 +863,7 @@ export const App: React.FC = () => {
             if (!config.window.locked) {
               api.setNoActivate(false).catch(() => {});
               setTimeout(() => {
-                if (!modalOpen && !editMode) {
+                if (!modalOpen && !editMode && !dockOpen) {
                   api.setNoActivate(true).catch(() => {});
                 }
               }, 1500);
@@ -710,6 +876,14 @@ export const App: React.FC = () => {
         </div>
 
         <div className="header-actions">
+          <button
+            type="button"
+            className={`hdr-btn ${dockOpen ? "hdr-btn-active" : ""}`}
+            onClick={() => setDockOpen((v) => !v)}
+            title="버튼 보관함 / 기본 프리셋 서랍"
+          >
+            <Package size={14} />
+          </button>
           {!config.window.locked && (
             <button
               type="button"
@@ -757,102 +931,121 @@ export const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Grid */}
-      <main
-        className={`deck-grid ${swipeOffset === 0 ? "deck-grid-snap" : ""}`}
-        style={{
-          gridTemplateColumns: `repeat(${config.grid.columns}, ${config.grid.cellSize}px)`,
-          gridTemplateRows: `repeat(${config.grid.rows}, ${config.grid.cellSize}px)`,
-          gap: config.grid.gap,
-          padding: `${PAD_Y}px ${PAD_X}px`,
-          touchAction: editMode ? "none" : "pan-y",
-          transform: swipeOffset !== 0 ? `translateX(${swipeOffset}px)` : undefined,
-        }}
-        onPointerDown={(e) => {
-          if (editMode || e.button !== 0 || modalOpen) return;
-          swipeRef.current = { startX: e.clientX, startY: e.clientY, swiping: false };
-        }}
-      >
-        {Array.from({ length: totalSlots }, (_, idx) => {
-          const item = currentPage.slots[String(idx)];
-          const resolvedIcon = item?.iconPath ? assetMap[item.iconPath] : undefined;
-          let procKey = "";
-          if (item?.action.type === "app") {
-            procKey = (
-              item.action.procName ||
-              item.action.exe.split(/[\\/]/).pop()?.replace(/\.exe$/i, "") ||
-              ""
-            ).toLowerCase();
-          }
-          const isRunning = procKey !== "" && runningSet.has(procKey);
-          const isForeground = procKey !== "" && fgProc === procKey;
+      <div className="deck-workspace">
+        <div className="deck-main-col">
+          {/* Grid */}
+          <main
+            className={`deck-grid ${swipeOffset === 0 ? "deck-grid-snap" : ""}`}
+            style={{
+              gridTemplateColumns: `repeat(${config.grid.columns}, ${config.grid.cellSize}px)`,
+              gridTemplateRows: `repeat(${config.grid.rows}, ${config.grid.cellSize}px)`,
+              gap: config.grid.gap,
+              padding: `${PAD_Y}px ${PAD_X}px`,
+              touchAction: editMode ? "none" : "pan-y",
+              transform: swipeOffset !== 0 ? `translateX(${swipeOffset}px)` : undefined,
+            }}
+            onPointerDown={(e) => {
+              if (editMode || e.button !== 0 || modalOpen) return;
+              swipeRef.current = { startX: e.clientX, startY: e.clientY, swiping: false };
+            }}
+          >
+            {Array.from({ length: totalSlots }, (_, idx) => {
+              const item = currentPage.slots[String(idx)];
+              const resolvedIcon = item?.iconPath ? assetMap[item.iconPath] : undefined;
+              let procKey = "";
+              if (item?.action.type === "app") {
+                procKey = (
+                  item.action.procName ||
+                  item.action.exe.split(/[\\/]/).pop()?.replace(/\.exe$/i, "") ||
+                  ""
+                ).toLowerCase();
+              }
+              const isRunning = procKey !== "" && runningSet.has(procKey);
+              const isForeground = procKey !== "" && fgProc === procKey;
 
-          return (
-            <ButtonTile
-              key={idx}
-              slotIndex={idx}
-              item={item}
-              resolvedIconAbsPath={resolvedIcon}
-              theme={config.theme}
-              cellSize={config.grid.cellSize}
-              borderRadius={config.grid.borderRadius}
-              editMode={editMode}
-              locked={config.window.locked}
-              isDropHover={dropHoverSlot === idx || (dragSwap !== null && dragSwap.overSlot === idx)}
-              isDraggingSource={dragSwap !== null && dragSwap.fromSlot === idx}
-              isRunning={isRunning}
-              isForeground={isForeground}
-              volumeState={volumeState}
-              nowPlaying={nowPlaying}
-              systemStats={systemStats}
-              clockText={clockText}
-              onExecute={handleExecute}
-              onEdit={(s) => setEditingSlot(s)}
-              onStartSlotDrag={handleStartSlotDrag}
-            />
-          );
-        })}
-      </main>
+              return (
+                <ButtonTile
+                  key={idx}
+                  slotIndex={idx}
+                  item={item}
+                  resolvedIconAbsPath={resolvedIcon}
+                  theme={config.theme}
+                  cellSize={config.grid.cellSize}
+                  borderRadius={config.grid.borderRadius}
+                  editMode={editMode}
+                  locked={config.window.locked}
+                  isDropHover={
+                    dropHoverSlot === idx || (dragSwap !== null && dragSwap.overSlot === idx)
+                  }
+                  isDraggingSource={dragSwap !== null && dragSwap.fromSlot === idx}
+                  isRunning={isRunning}
+                  isForeground={isForeground}
+                  volumeState={volumeState}
+                  discordState={discordState}
+                  nowPlaying={nowPlaying}
+                  systemStats={systemStats}
+                  clockText={clockText}
+                  onExecute={handleExecute}
+                  onEdit={(s) => setEditingSlot(s)}
+                  onStartSlotDrag={handleStartSlotDrag}
+                />
+              );
+            })}
+          </main>
 
-      {/* Page Switcher Footer */}
-      <footer className="deck-footer">
-        <button
-          type="button"
-          className="page-arrow"
-          disabled={pageIndex <= 0}
-          onClick={() => setPageIndex((i) => Math.max(0, i - 1))}
-          title="이전 페이지"
-        >
-          <ChevronLeft size={16} />
-        </button>
-
-        <div className="page-dots">
-          {config.pages.map((p, idx) => (
+          {/* Page Switcher Footer */}
+          <footer className="deck-footer">
             <button
-              key={p.id}
               type="button"
-              className={`page-tab ${idx === pageIndex ? "page-tab-active" : ""}`}
-              onClick={() => setPageIndex(idx)}
+              className="page-arrow"
+              disabled={pageIndex <= 0}
+              onClick={() => setPageIndex((i) => Math.max(0, i - 1))}
+              title="이전 페이지"
             >
-              {p.name}
+              <ChevronLeft size={16} />
             </button>
-          ))}
+
+            <div className="page-dots">
+              {config.pages.map((p, idx) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  className={`page-tab ${idx === pageIndex ? "page-tab-active" : ""}`}
+                  onClick={() => setPageIndex(idx)}
+                >
+                  {p.name}
+                </button>
+              ))}
+            </div>
+
+            <button
+              type="button"
+              className="page-arrow"
+              disabled={pageIndex >= config.pages.length - 1}
+              onClick={() => setPageIndex((i) => Math.min(config.pages.length - 1, i + 1))}
+              title="다음 페이지"
+            >
+              <ChevronRight size={16} />
+            </button>
+          </footer>
         </div>
 
-        <button
-          type="button"
-          className="page-arrow"
-          disabled={pageIndex >= config.pages.length - 1}
-          onClick={() => setPageIndex((i) => Math.min(config.pages.length - 1, i + 1))}
-          title="다음 페이지"
-        >
-          <ChevronRight size={16} />
-        </button>
-      </footer>
+        {dockOpen && (
+          <ButtonDock
+            vault={config.vault ?? []}
+            assetMap={assetMap}
+            isVaultDropHover={vaultHover}
+            onQuickInsert={handleQuickInsertFromDock}
+            onRemoveFromVault={handleRemoveFromVault}
+            onStartDockDrag={handleStartDockDrag}
+            onClose={() => setDockOpen(false)}
+          />
+        )}
+      </div>
 
       {toast && <div className="toast-pill">{toast}</div>}
 
-      {dragSwap && currentPage.slots[String(dragSwap.fromSlot)] && (
+      {dragSwap && (
         <div
           className="drag-ghost"
           style={{
@@ -860,7 +1053,7 @@ export const App: React.FC = () => {
             top: dragSwap.clientY,
           }}
         >
-          {currentPage.slots[String(dragSwap.fromSlot)].label}
+          {dragSwap.label}
         </div>
       )}
 
@@ -872,6 +1065,7 @@ export const App: React.FC = () => {
           pages={config.pages}
           onSave={handleSaveSlot}
           onDelete={handleDeleteSlot}
+          onMoveToVault={handleMoveToVault}
           onTransferToPage={handleTransferToPage}
           onClose={() => setEditingSlot(null)}
         />
@@ -881,6 +1075,7 @@ export const App: React.FC = () => {
         <SettingsDrawer
           config={config}
           currentPageIndex={pageIndex}
+          discordState={discordState}
           onChange={persistConfig}
           onSwitchPage={setPageIndex}
           onReloadFromDisk={reloadConfig}

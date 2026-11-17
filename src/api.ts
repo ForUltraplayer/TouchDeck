@@ -3,6 +3,7 @@ import type {
   AudioDeviceInfo,
   ButtonAction,
   DeckConfig,
+  DiscordState,
   EnvInfo,
   NowPlayingInfo,
   ResolvedDrop,
@@ -24,6 +25,10 @@ export const api = {
     invoke<string>("extract_icon_for_path", { path, isFolder }),
   executeAction: (action: ButtonAction) =>
     invoke<{ volume: VolumeState | null; message: string | null }>("execute_action", { action }),
+  getDiscordState: () => invoke<DiscordState>("get_discord_state"),
+  authorizeDiscord: (clientId: string, clientSecret: string) =>
+    invoke<void>("authorize_discord", { clientId, clientSecret }),
+  disconnectDiscord: () => invoke<void>("disconnect_discord"),
   getVolumeState: () => invoke<VolumeState>("get_volume_state"),
   listAudioDevices: () => invoke<AudioDeviceInfo[]>("list_audio_devices"),
   getNowPlaying: () => invoke<NowPlayingInfo | null>("get_now_playing"),

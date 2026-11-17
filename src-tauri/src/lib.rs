@@ -1,4 +1,5 @@
 mod config;
+mod win_discord;
 mod win_focus;
 mod win_media;
 mod win_shell;
@@ -15,7 +16,8 @@ use std::thread;
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, State};
+use win_discord::{DiscordBridge, DiscordCommand, DiscordState};
 use win_focus::RunningStatus;
 use win_media::{AudioDeviceInfo, NowPlayingInfo, SystemStats, VolumeState};
 use win_shell::ResolvedDrop;
@@ -85,7 +87,10 @@ fn extract_icon_for_path(path: String, is_folder: bool) -> Result<String, String
     win_shell::extract_icon_asset(&path, is_folder)
 }
 
-fn execute_single_action(action: &ButtonAction) -> Result<ExecuteResult, String> {
+fn execute_single_action(
+    action: &ButtonAction,
+    discord: Option<&DiscordBridge>,
+) -> Result<ExecuteResult, String> {
     match action {
         ButtonAction::App { .. } | ButtonAction::Folder { .. } | ButtonAction::Url { .. } => {
             win_focus::execute_launch_action(action)?;
@@ -126,11 +131,29 @@ fn execute_single_action(action: &ButtonAction) -> Result<ExecuteResult, String>
                 message: None,
             })
         }
+        ButtonAction::Discord { command } => {
+            let bridge = discord.ok_or_else(|| "Discord 브리지가 초기화되지 않았습니다.".to_string())?;
+            let st = bridge.get_state();
+            if !st.authenticated {
+                return Err("Discord RPC가 연결되지 않았습니다. 설정에서 승인해 주세요.".into());
+            }
+            match command.as_str() {
+                "mute" => bridge.send(DiscordCommand::ToggleMute)?,
+                "deaf" => bridge.send(DiscordCommand::ToggleDeaf)?,
+                "disconnect" => bridge.send(DiscordCommand::DisconnectVoice)?,
+                _ => return Err(format!("알 수 없는 Discord 명령: {command}")),
+            }
+            Ok(ExecuteResult {
+                volume: None,
+                message: None,
+            })
+        }
         ButtonAction::Multi { steps } => {
             let steps_owned = steps.clone();
+            let discord_owned = discord.cloned();
             thread::spawn(move || {
                 for step in steps_owned {
-                    let _ = execute_single_action(&step.action);
+                    let _ = execute_single_action(&step.action, discord_owned.as_ref());
                     if step.delay_ms > 0 {
                         thread::sleep(Duration::from_millis(step.delay_ms as u64));
                     }
@@ -149,8 +172,33 @@ fn execute_single_action(action: &ButtonAction) -> Result<ExecuteResult, String>
 }
 
 #[tauri::command]
-fn execute_action(action: ButtonAction) -> Result<ExecuteResult, String> {
-    execute_single_action(&action)
+fn execute_action(
+    action: ButtonAction,
+    discord: State<'_, DiscordBridge>,
+) -> Result<ExecuteResult, String> {
+    execute_single_action(&action, Some(discord.inner()))
+}
+
+#[tauri::command]
+fn get_discord_state(discord: State<'_, DiscordBridge>) -> DiscordState {
+    discord.get_state()
+}
+
+#[tauri::command]
+fn authorize_discord(
+    client_id: String,
+    client_secret: String,
+    discord: State<'_, DiscordBridge>,
+) -> Result<(), String> {
+    discord.send(DiscordCommand::Authorize {
+        client_id,
+        client_secret,
+    })
+}
+
+#[tauri::command]
+fn disconnect_discord(discord: State<'_, DiscordBridge>) -> Result<(), String> {
+    discord.send(DiscordCommand::Disconnect)
 }
 
 #[tauri::command]
@@ -347,6 +395,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let bridge = DiscordBridge::start(app.handle().clone());
+            app.manage(bridge);
+
             let show_i = MenuItem::with_id(app, "show", "TouchDeck 보이기", true, None::<&str>)?;
             let hide_i = MenuItem::with_id(app, "hide", "숨기기", true, None::<&str>)?;
             let settings_i =
@@ -414,6 +465,9 @@ pub fn run() {
             resolve_asset,
             extract_icon_for_path,
             execute_action,
+            get_discord_state,
+            authorize_discord,
+            disconnect_discord,
             get_volume_state,
             list_audio_devices,
             get_now_playing,

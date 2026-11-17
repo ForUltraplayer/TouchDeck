@@ -81,9 +81,29 @@ export type ButtonAction =
       steps: MultiStep[];
     }
   | {
+      type: "discord";
+      command: "mute" | "deaf" | "disconnect";
+    }
+  | {
       type: "widget";
       kind: "clock" | "sys_stats" | "now_playing";
     };
+
+export interface DiscordConfig {
+  clientId: string;
+  clientSecret: string;
+  accessToken: string;
+  refreshToken: string;
+}
+
+export interface DiscordState {
+  pipeConnected: boolean;
+  authenticated: boolean;
+  muted: boolean;
+  deaf: boolean;
+  inVoice: boolean;
+  lastError: string | null;
+}
 
 export interface ButtonItem {
   id: string;
@@ -111,6 +131,8 @@ export interface DeckConfig {
   grid: GridConfig;
   theme: ThemeConfig;
   pages: DeckPage[];
+  vault?: ButtonItem[];
+  discord?: DiscordConfig;
 }
 
 export interface EnvInfo {

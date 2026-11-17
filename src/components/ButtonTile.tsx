@@ -6,6 +6,7 @@ import {
   Cpu,
   Folder,
   Globe,
+  HeadphoneOff,
   Headphones,
   Keyboard,
   Layers,
@@ -13,6 +14,7 @@ import {
   MicOff,
   Music,
   Pause,
+  PhoneOff,
   Play,
   Plus,
   SkipBack,
@@ -25,6 +27,7 @@ import {
 import { assetUrl, hexToRgba } from "../api";
 import type {
   ButtonItem,
+  DiscordState,
   NowPlayingInfo,
   SystemStats,
   ThemeConfig,
@@ -45,6 +48,7 @@ interface Props {
   isRunning: boolean;
   isForeground: boolean;
   volumeState: VolumeState | null;
+  discordState: DiscordState | null;
   nowPlaying: NowPlayingInfo | null;
   systemStats: SystemStats | null;
   clockText: { time: string; date: string };
@@ -56,6 +60,7 @@ interface Props {
 function renderFallbackIcon(
   item: ButtonItem,
   volumeState: VolumeState | null,
+  discordState: DiscordState | null,
   nowPlaying: NowPlayingInfo | null,
   size: number
 ) {
@@ -86,6 +91,22 @@ function renderFallbackIcon(
       return <Volume2 size={size} strokeWidth={1.8} color="#34D399" />;
     case "audio_device":
       return <Headphones size={size} strokeWidth={1.8} color="#38BDF8" />;
+    case "discord":
+      if (act.command === "mute") {
+        return discordState?.muted ? (
+          <MicOff size={size} strokeWidth={2} color="#F87171" />
+        ) : (
+          <Mic size={size} strokeWidth={1.8} color={discordState?.authenticated ? "#818CF8" : "#64748B"} />
+        );
+      }
+      if (act.command === "deaf") {
+        return discordState?.deaf ? (
+          <HeadphoneOff size={size} strokeWidth={2} color="#F87171" />
+        ) : (
+          <Headphones size={size} strokeWidth={1.8} color={discordState?.authenticated ? "#818CF8" : "#64748B"} />
+        );
+      }
+      return <PhoneOff size={size} strokeWidth={1.8} color={discordState?.inVoice ? "#F87171" : "#64748B"} />;
     case "media":
       if (act.command === "next") return <SkipForward size={size} strokeWidth={1.8} color="#E2E8F0" />;
       if (act.command === "prev") return <SkipBack size={size} strokeWidth={1.8} color="#E2E8F0" />;
@@ -128,6 +149,7 @@ export const ButtonTile: React.FC<Props> = ({
   isRunning,
   isForeground,
   volumeState,
+  discordState,
   nowPlaying,
   systemStats,
   clockText,
@@ -244,6 +266,22 @@ export const ButtonTile: React.FC<Props> = ({
         )
       )}
 
+      {item.action.type === "discord" && (
+        !discordState?.authenticated ? (
+          <span className="vol-badge dc-offline">미연결</span>
+        ) : item.action.command === "mute" ? (
+          <span className={`vol-badge ${discordState.muted ? "vol-muted" : "dc-on"}`}>
+            {discordState.muted ? "DC MUTE" : "DC ON"}
+          </span>
+        ) : item.action.command === "deaf" ? (
+          <span className={`vol-badge ${discordState.deaf ? "vol-muted" : "dc-on"}`}>
+            {discordState.deaf ? "DEAF" : "HEAR"}
+          </span>
+        ) : discordState.inVoice ? (
+          <span className="vol-badge dc-on">VOICE</span>
+        ) : null
+      )}
+
       {isWidget && item.action.type === "widget" ? (
         <div className="widget-box">
           {item.action.kind === "clock" && (
@@ -292,7 +330,7 @@ export const ButtonTile: React.FC<Props> = ({
                 draggable={false}
               />
             ) : (
-              renderFallbackIcon(item, volumeState, nowPlaying, Math.round(iconBoxSize * 0.72))
+              renderFallbackIcon(item, volumeState, discordState, nowPlaying, Math.round(iconBoxSize * 0.72))
             )}
           </div>
 

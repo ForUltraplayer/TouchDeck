@@ -42,6 +42,7 @@ features = [
     "Win32_Devices_FunctionDiscovery",
     "Win32_Networking_WinHttp",
     "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
     "Media_Control",
     "Foundation",
 ]

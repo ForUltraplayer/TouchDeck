@@ -2,11 +2,12 @@ import React, { useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Download, FolderOpen, Image as ImageIcon, Plus, Trash2, X } from "lucide-react";
 import { api } from "../api";
-import type { DeckConfig, EnvInfo } from "../types";
+import type { DeckConfig, DiscordState, EnvInfo } from "../types";
 
 interface Props {
   config: DeckConfig;
   currentPageIndex: number;
+  discordState: DiscordState | null;
   onChange: (next: DeckConfig) => void;
   onSwitchPage: (idx: number) => void;
   onReloadFromDisk: () => void;
@@ -16,6 +17,7 @@ interface Props {
 export const SettingsDrawer: React.FC<Props> = ({
   config,
   currentPageIndex,
+  discordState,
   onChange,
   onSwitchPage,
   onReloadFromDisk,
@@ -23,6 +25,8 @@ export const SettingsDrawer: React.FC<Props> = ({
 }) => {
   const [envInfo, setEnvInfo] = useState<EnvInfo | null>(null);
   const [statusMsg, setStatusMsg] = useState<string>("");
+  const [dcClientId, setDcClientId] = useState(config.discord?.clientId ?? "");
+  const [dcClientSecret, setDcClientSecret] = useState(config.discord?.clientSecret ?? "");
 
   useEffect(() => {
     api.getEnvInfo().then(setEnvInfo).catch(() => {});
@@ -387,6 +391,67 @@ export const SettingsDrawer: React.FC<Props> = ({
                 </button>
               </div>
             ))}
+          </div>
+
+          <div className="divider" />
+          <div className="section-title">Discord 양방향 RPC 연동</div>
+          <div className="hint-text">
+            상태:{" "}
+            {discordState?.authenticated
+              ? "양방향 동기화 연결됨 (실시간 반영 중)"
+              : discordState?.pipeConnected
+              ? "Discord 앱 연결됨 (승인 대기)"
+              : "미연결"}
+            {discordState?.lastError ? ` · ${discordState.lastError}` : ""}
+          </div>
+          <div className="field-row two-col">
+            <div>
+              <label>Application Client ID</label>
+              <input
+                type="text"
+                value={dcClientId}
+                onChange={(e) => setDcClientId(e.target.value)}
+                placeholder="Discord Developer Portal Client ID"
+              />
+            </div>
+            <div>
+              <label>Client Secret</label>
+              <input
+                type="text"
+                value={dcClientSecret}
+                onChange={(e) => setDcClientSecret(e.target.value)}
+                placeholder="OAuth2 Client Secret"
+              />
+            </div>
+          </div>
+          <div className="inline-group">
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={!dcClientId.trim() || !dcClientSecret.trim()}
+              onClick={async () => {
+                try {
+                  await api.authorizeDiscord(dcClientId.trim(), dcClientSecret.trim());
+                  setStatusMsg("Discord 앱에 뜨는 '승인(Authorize)' 창을 확인해 주세요.");
+                } catch (e) {
+                  setStatusMsg(`Discord 연결 오류: ${String(e)}`);
+                }
+              }}
+            >
+              Discord 승인 / 연결
+            </button>
+            {discordState?.authenticated && (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => api.disconnectDiscord().catch(() => {})}
+              >
+                연결 해제
+              </button>
+            )}
+          </div>
+          <div className="hint-text">
+            * Discord Developer Portal → New Application → OAuth2 Redirects에 <code>http://localhost</code> 추가 후 ID/Secret 입력
           </div>
 
           <div className="divider" />

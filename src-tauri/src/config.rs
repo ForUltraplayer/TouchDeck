@@ -52,6 +52,19 @@ pub struct ThemeConfig {
     pub icon_rounded: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscordConfig {
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+    #[serde(default)]
+    pub access_token: String,
+    #[serde(default)]
+    pub refresh_token: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MultiStep {
@@ -108,6 +121,9 @@ pub enum ButtonAction {
     Multi {
         steps: Vec<MultiStep>,
     },
+    Discord {
+        command: String, // "mute" | "deaf" | "disconnect"
+    },
     Widget {
         kind: String, // "clock" | "sys_stats" | "now_playing"
     },
@@ -155,6 +171,10 @@ pub struct DeckConfig {
     pub grid: GridConfig,
     pub theme: ThemeConfig,
     pub pages: Vec<DeckPage>,
+    #[serde(default)]
+    pub vault: Vec<ButtonItem>,
+    #[serde(default)]
+    pub discord: DiscordConfig,
 }
 
 impl Default for DeckConfig {
@@ -390,6 +410,8 @@ impl Default for DeckConfig {
                     slots: page2_slots,
                 },
             ],
+            vault: Vec::new(),
+            discord: DiscordConfig::default(),
         }
     }
 }

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
+  Archive,
   Copy,
   FolderOpen,
   Globe,
@@ -26,6 +27,7 @@ interface Props {
   pages: DeckPage[];
   onSave: (slotIndex: number, item: ButtonItem) => void;
   onDelete: (slotIndex: number) => void;
+  onMoveToVault: (slotIndex: number) => void;
   onTransferToPage: (slotIndex: number, targetPageIdx: number, move: boolean) => void;
   onClose: () => void;
 }
@@ -83,6 +85,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
   pages,
   onSave,
   onDelete,
+  onMoveToVault,
   onTransferToPage,
   onClose,
 }) => {
@@ -159,6 +162,9 @@ export const ButtonEditorModal: React.FC<Props> = ({
         break;
       case "page":
         setItem({ ...item, action: { type: "page", pageIndex: 0 } });
+        break;
+      case "discord":
+        setItem({ ...item, action: { type: "discord", command: "mute" } });
         break;
       case "widget":
         setItem({ ...item, action: { type: "widget", kind: "clock" } });
@@ -321,6 +327,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
               <option value="volume">볼륨 / 마이크 음소거</option>
               <option value="media">미디어 제어 (재생/곡 넘김)</option>
               <option value="audio_device">오디오 출력 장치 전환</option>
+              <option value="discord">Discord 양방향 제어 (음소거/데픈/나가기)</option>
               <option value="hotkey">키보드 단축키</option>
               <option value="multi">멀티 액션 (순차 실행)</option>
               <option value="page">페이지 이동</option>
@@ -553,6 +560,28 @@ export const ButtonEditorModal: React.FC<Props> = ({
                     {d.name} {d.isDefault ? "(현재 기본)" : ""}
                   </option>
                 ))}
+              </select>
+            </div>
+          )}
+
+          {item.action.type === "discord" && (
+            <div className="field-row">
+              <label>Discord 음성 명령 (설정에서 RPC 연동 필요)</label>
+              <select
+                value={item.action.command}
+                onChange={(e) =>
+                  setItem({
+                    ...item,
+                    action: {
+                      type: "discord",
+                      command: e.target.value as "mute" | "deaf" | "disconnect",
+                    },
+                  })
+                }
+              >
+                <option value="mute">마이크 음소거 토글</option>
+                <option value="deaf">헤드셋 소리 끄기(Deafen) 토글</option>
+                <option value="disconnect">음성 채널 나가기</option>
               </select>
             </div>
           )}
@@ -909,13 +938,23 @@ export const ButtonEditorModal: React.FC<Props> = ({
 
         <div className="modal-footer">
           {initialItem ? (
-            <button
-              type="button"
-              className="btn-danger"
-              onClick={() => onDelete(slotIndex)}
-            >
-              <Trash2 size={14} /> 삭제
-            </button>
+            <div className="inline-group">
+              <button
+                type="button"
+                className="btn-danger"
+                onClick={() => onDelete(slotIndex)}
+              >
+                <Trash2 size={14} /> 삭제
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => onMoveToVault(slotIndex)}
+                title="이 버튼을 보관함으로 옮기기"
+              >
+                <Archive size={14} /> 보관
+              </button>
+            </div>
           ) : (
             <span />
           )}
