@@ -1,0 +1,15 @@
+# Logs & OS
+*.log
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+dist/
+
+# Rust / Tauri
+src-tauri/target/
+
+# Local runtime portable data
+data/
+assets/
