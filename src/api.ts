@@ -58,6 +58,7 @@ export const api = {
       dockOnLeft: boolean;
       dockPhysW: number;
       scale: number;
+      recentered: boolean;
     }>("sync_window_bounds", {
       anchorX,
       anchorY,

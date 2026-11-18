@@ -40,7 +40,9 @@ interface UseDeckWindowLayoutParams {
 const MIN_MODAL_W = 600;
 const MIN_MODAL_H = 680;
 const ANIM_MS = 230;
-const PROGRAMMATIC_MOVE_GRACE_MS = 700;
+const PROGRAMMATIC_MOVE_GRACE_MS = 1500;
+const MONITOR_RECOVERY_INTERVAL_MS = 2000;
+const MONITOR_RECOVERY_MAX_ATTEMPTS = 15;
 
 function afterTwoFrames(fn: () => void) {
   requestAnimationFrame(() => requestAnimationFrame(fn));
@@ -72,6 +74,7 @@ export function useDeckWindowLayout({
 
   const moveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const animTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recoveryTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const animSeqRef = useRef(0);
   const prevLayoutRef = useRef<LayoutSnapshot | null>(null);
   const activeModalRef = useRef<ModalSnapshot | null>(null);
@@ -82,6 +85,13 @@ export function useDeckWindowLayout({
   const modalOpenRef = useRef(false);
   const shellRectRef = useRef(shellRect);
   shellRectRef.current = shellRect;
+
+  const stopMonitorRecovery = useCallback(() => {
+    if (recoveryTimerRef.current) {
+      clearInterval(recoveryTimerRef.current);
+      recoveryTimerRef.current = null;
+    }
+  }, []);
 
   const modalOpen = settingsOpen || editingSlot !== null;
   modalOpenRef.current = modalOpen;
@@ -172,7 +182,33 @@ export function useDeckWindowLayout({
       if (!prev) {
         const res = await queryBounds(0, gridW, gridH, true);
         if (!res) return;
-        homePosRef.current = { x: res.x, y: res.y };
+        if (res.recentered && anchorX !== null && anchorY !== null) {
+          // Secondary monitor may still be waking up at boot: preserve saved anchor and retry briefly.
+          stopMonitorRecovery();
+          let attempts = 0;
+          recoveryTimerRef.current = setInterval(async () => {
+            attempts += 1;
+            if (attempts > MONITOR_RECOVERY_MAX_ATTEMPTS || modalOpenRef.current) {
+              if (attempts > MONITOR_RECOVERY_MAX_ATTEMPTS) stopMonitorRecovery();
+              return;
+            }
+            const curHome = homePosRef.current;
+            if (!curHome) {
+              stopMonitorRecovery();
+              return;
+            }
+            const probe = await api
+              .syncWindowBounds(curHome.x, curHome.y, gridW, gridH, 0, gridW, gridH, false)
+              .catch(() => null);
+            if (probe && !probe.recentered) {
+              stopMonitorRecovery();
+              await queryBounds(0, gridW, gridH, true);
+            }
+          }, MONITOR_RECOVERY_INTERVAL_MS);
+        } else {
+          stopMonitorRecovery();
+          homePosRef.current = { x: res.x, y: res.y };
+        }
         return;
       }
 
@@ -336,24 +372,30 @@ export function useDeckWindowLayout({
       const res = await queryBounds(extraDockW, gridW + extraDockW, gridH, true);
       if (!res) return;
       setDockOnLeft(res.dockOnLeft);
-      if (!dockOpen) {
+      if (!dockOpen && !res.recentered) {
         homePosRef.current = { x: res.x, y: res.y };
       }
     };
 
     run().catch(() => {});
-  }, [gridCols, gridRows, gridCellSize, gridGap, modalOpen, dockOpen, headerH, footerH, padX, padY, dockW]);
+  }, [gridCols, gridRows, gridCellSize, gridGap, modalOpen, dockOpen, headerH, footerH, padX, padY, dockW, stopMonitorRecovery]);
 
   // Save window position only on genuine manual drags (never during locked/modal/programmatic shifts)
   useEffect(() => {
     const win = getCurrentWindow();
     const unlistenPromise = win.onMoved(({ payload }) => {
       const cur = configRef.current;
+      const lastTarget = lastWinPosRef.current;
+      const matchesApplied =
+        lastTarget !== null &&
+        Math.abs(payload.x - lastTarget.x) <= 2 &&
+        Math.abs(payload.y - lastTarget.y) <= 2;
       if (
         !cur ||
         cur.window.locked ||
         modalOpenRef.current ||
         activeModalRef.current !== null ||
+        matchesApplied ||
         Date.now() < programmaticMoveUntilRef.current
       ) {
         return;
@@ -370,6 +412,7 @@ export function useDeckWindowLayout({
         ) {
           return;
         }
+        stopMonitorRecovery();
         lastWinPosRef.current = { x: payload.x, y: payload.y };
         const anchorX = payload.x + activeDockPhysWRef.current;
         const anchorY = payload.y;
@@ -380,14 +423,15 @@ export function useDeckWindowLayout({
         };
         setConfig(next);
         api.saveConfig(next).catch(() => {});
-      }, 400);
+      }, 300);
     });
     return () => {
       if (moveTimerRef.current) clearTimeout(moveTimerRef.current);
       if (animTimerRef.current) clearTimeout(animTimerRef.current);
+      stopMonitorRecovery();
       unlistenPromise.then((fn) => fn());
     };
-  }, [configRef, setConfig]);
+  }, [configRef, setConfig, stopMonitorRecovery]);
 
   const renderedModal: ModalSnapshot | null =
     editingSlot !== null

@@ -45,6 +45,19 @@ pub fn is_autostart_enabled() -> bool {
     startup_shortcut_path().map(|p| p.exists()).unwrap_or(false)
 }
 
+pub fn refresh_autostart_if_enabled() {
+    if cfg!(debug_assertions) || !is_autostart_enabled() {
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let s = exe.to_string_lossy();
+        if s.contains("\\target\\") || s.contains("/target/") {
+            return;
+        }
+        let _ = set_autostart(true);
+    }
+}
+
 pub fn set_autostart(enabled: bool) -> Result<bool, String> {
     let lnk_path = startup_shortcut_path()?;
     if !enabled {
@@ -110,6 +123,7 @@ pub struct WindowBoundsResult {
     pub dock_on_left: bool,
     pub dock_phys_w: i32,
     pub scale: f64,
+    pub recentered: bool,
 }
 
 unsafe fn get_monitor_work_area(x: i32, y: i32, w: i32, h: i32) -> (RECT, bool) {
@@ -208,6 +222,7 @@ fn compute_window_bounds(
         dock_on_left,
         dock_phys_w: if dock_on_left { phys_dock_w } else { 0 },
         scale,
+        recentered,
     }
 }
 
@@ -460,6 +475,7 @@ mod tests {
     fn disconnected_monitor_recenters_on_primary_work_area() {
         let rc = work_rect();
         let res = compute_window_bounds(rc, true, 4000, 3000, 568, 500, 0, 568, 500, 1.0);
+        assert!(res.recentered);
         assert_eq!(res.x, (1920 - 568) / 2);
         assert_eq!(res.y, (1040 - 500) / 2);
     }

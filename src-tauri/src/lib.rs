@@ -544,6 +544,52 @@ pub fn run() {
 
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_skip_taskbar(true);
+                win_window::refresh_autostart_if_enabled();
+                if let Ok(cfg) = load_config() {
+                    if let (Some(x), Some(y)) = (cfg.window.x, cfg.window.y) {
+                        let cols = cfg.grid.columns as f64;
+                        let rows = cfg.grid.rows as f64;
+                        let cell = cfg.grid.cell_size as f64;
+                        let gap = cfg.grid.gap as f64;
+                        let grid_w = cols * cell + (cols - 1.0).max(0.0) * gap + 28.0;
+                        let grid_h = rows * cell + (rows - 1.0).max(0.0) * gap + 92.0;
+                        if let Ok(hwnd) = w.hwnd() {
+                            let scale = w.scale_factor().unwrap_or(1.0);
+                            let cur = w.outer_position().map(|p| (p.x, p.y)).unwrap_or((x, y));
+                            let res = win_window::sync_window_bounds(
+                                hwnd.0 as isize,
+                                cur,
+                                scale,
+                                Some(x),
+                                Some(y),
+                                grid_w,
+                                grid_h,
+                                0.0,
+                                grid_w,
+                                grid_h,
+                                true,
+                            );
+                            if res.is_ok() {
+                                let new_scale = w.scale_factor().unwrap_or(scale);
+                                if (new_scale - scale).abs() > 0.01 {
+                                    let _ = win_window::sync_window_bounds(
+                                        hwnd.0 as isize,
+                                        (x, y),
+                                        new_scale,
+                                        Some(x),
+                                        Some(y),
+                                        grid_w,
+                                        grid_h,
+                                        0.0,
+                                        grid_w,
+                                        grid_h,
+                                        true,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             let _tray = TrayIconBuilder::new()
