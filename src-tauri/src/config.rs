@@ -466,8 +466,7 @@ fn sanitize_config(mut cfg: DeckConfig) -> DeckConfig {
     cfg
 }
 
-fn save_config_unlocked(cfg: &DeckConfig) -> Result<(), String> {
-    let dir = get_data_dir()?;
+fn save_config_to_dir(dir: &Path, cfg: &DeckConfig) -> Result<(), String> {
     let cfg_path = dir.join("config.json");
     let tmp_path = dir.join("config.json.tmp");
     let json = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
@@ -476,12 +475,11 @@ fn save_config_unlocked(cfg: &DeckConfig) -> Result<(), String> {
     Ok(())
 }
 
-fn load_config_unlocked() -> Result<DeckConfig, String> {
-    let dir = get_data_dir()?;
+fn load_or_recover_config_in(dir: &Path) -> Result<DeckConfig, String> {
     let cfg_path = dir.join("config.json");
     if !cfg_path.exists() {
         let def = DeckConfig::default();
-        save_config_unlocked(&def)?;
+        save_config_to_dir(dir, &def)?;
         return Ok(def);
     }
     match fs::read_to_string(&cfg_path)
@@ -493,8 +491,29 @@ fn load_config_unlocked() -> Result<DeckConfig, String> {
             let bak_path = dir.join("config.json.bak");
             let _ = fs::copy(&cfg_path, &bak_path);
             let def = DeckConfig::default();
-            save_config_unlocked(&def)?;
+            save_config_to_dir(dir, &def)?;
             Ok(def)
+        }
+    }
+}
+
+fn save_config_unlocked(cfg: &DeckConfig) -> Result<(), String> {
+    let dir = get_data_dir()?;
+    save_config_to_dir(&dir, cfg)
+}
+
+fn load_config_unlocked() -> Result<DeckConfig, String> {
+    let dir = get_data_dir()?;
+    load_or_recover_config_in(&dir)
+}
+
+fn merge_ui_discord(merged: &mut DeckConfig, disk: &DeckConfig) {
+    if merged.discord.access_token.is_empty() && merged.discord.refresh_token.is_empty() {
+        if !disk.discord.access_token.is_empty() || !disk.discord.refresh_token.is_empty() {
+            merged.discord = disk.discord.clone();
+        } else if merged.discord.client_id.is_empty() && !disk.discord.client_id.is_empty() {
+            merged.discord.client_id = disk.discord.client_id.clone();
+            merged.discord.client_secret = disk.discord.client_secret.clone();
         }
     }
 }
@@ -512,15 +531,8 @@ pub fn save_config(cfg: &DeckConfig) -> Result<(), String> {
 pub fn save_config_from_ui(cfg: &DeckConfig) -> Result<(), String> {
     let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut merged = sanitize_config(cfg.clone());
-    if merged.discord.access_token.is_empty() && merged.discord.refresh_token.is_empty() {
-        if let Ok(disk) = load_config_unlocked() {
-            if !disk.discord.access_token.is_empty() || !disk.discord.refresh_token.is_empty() {
-                merged.discord = disk.discord;
-            } else if merged.discord.client_id.is_empty() && !disk.discord.client_id.is_empty() {
-                merged.discord.client_id = disk.discord.client_id;
-                merged.discord.client_secret = disk.discord.client_secret;
-            }
-        }
+    if let Ok(disk) = load_config_unlocked() {
+        merge_ui_discord(&mut merged, &disk);
     }
     save_config_unlocked(&merged)
 }
@@ -564,4 +576,59 @@ pub fn resolve_asset_path(rel_or_abs: &str) -> Result<PathBuf, String> {
         return Ok(p.to_path_buf());
     }
     Ok(get_data_dir()?.join(p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_config_clamps_grid_and_restores_empty_pages() {
+        let mut cfg = DeckConfig::default();
+        cfg.grid.columns = 99;
+        cfg.grid.rows = 0;
+        cfg.grid.cell_size = 10;
+        cfg.grid.gap = 99;
+        cfg.pages.clear();
+
+        let out = sanitize_config(cfg);
+        assert_eq!(out.grid.columns, 10);
+        assert_eq!(out.grid.rows, 1);
+        assert_eq!(out.grid.cell_size, 60);
+        assert_eq!(out.grid.gap, 32);
+        assert!(!out.pages.is_empty());
+    }
+
+    #[test]
+    fn merge_ui_discord_preserves_disk_tokens_when_ui_stale() {
+        let mut ui = DeckConfig::default();
+        let mut disk = DeckConfig::default();
+        disk.discord.client_id = "cid".into();
+        disk.discord.client_secret = "csec".into();
+        disk.discord.access_token = "acc".into();
+        disk.discord.refresh_token = "ref".into();
+
+        merge_ui_discord(&mut ui, &disk);
+        assert_eq!(ui.discord.access_token, "acc");
+        assert_eq!(ui.discord.refresh_token, "ref");
+        assert_eq!(ui.discord.client_id, "cid");
+    }
+
+    #[test]
+    fn load_or_recover_backs_up_corrupted_json_and_returns_default() {
+        let dir = std::env::temp_dir().join(format!(
+            "touchdeck_cfg_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.json"), "{not valid json").unwrap();
+
+        let loaded = load_or_recover_config_in(&dir).unwrap();
+        assert!(!loaded.pages.is_empty());
+        assert_eq!(fs::read_to_string(dir.join("config.json.bak")).unwrap(), "{not valid json");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

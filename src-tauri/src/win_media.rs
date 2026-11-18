@@ -1,3 +1,4 @@
+use crate::win_com::ComGuard;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::{Interface, GUID, HRESULT, PCWSTR};
@@ -12,10 +13,7 @@ use windows::Win32::Media::Audio::{
     MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
-    COINIT_APARTMENTTHREADED, STGM_READ,
-};
+use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL, STGM_READ};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL,
@@ -51,28 +49,11 @@ pub struct NowPlayingInfo {
     pub playing: bool,
 }
 
-struct ComGuard(bool);
-impl ComGuard {
-    fn new() -> Self {
-        let should_uninit = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
-        Self(should_uninit)
-    }
-}
-impl Drop for ComGuard {
-    fn drop(&mut self) {
-        if self.0 {
-            unsafe {
-                CoUninitialize();
-            }
-        }
-    }
-}
-
 fn with_endpoint_volume<T, F: FnOnce(&IAudioEndpointVolume) -> Result<T, String>>(
     capture: bool,
     f: F,
 ) -> Result<T, String> {
-    let _com = ComGuard::new();
+    let _com = ComGuard::sta();
     unsafe {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
@@ -95,7 +76,7 @@ fn with_endpoint_volume<T, F: FnOnce(&IAudioEndpointVolume) -> Result<T, String>
 static CACHED_MIC_MUTED: AtomicBool = AtomicBool::new(false);
 
 pub fn get_volume_state() -> Result<VolumeState, String> {
-    let _com = ComGuard::new();
+    let _com = ComGuard::sta();
     unsafe {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
@@ -196,7 +177,7 @@ pub fn adjust_volume(command: &str, step: u8, target: &str) -> Result<VolumeStat
 }
 
 pub fn list_audio_devices() -> Result<Vec<AudioDeviceInfo>, String> {
-    let _com = ComGuard::new();
+    let _com = ComGuard::sta();
     unsafe {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
@@ -283,7 +264,7 @@ pub fn switch_audio_device(device_id: Option<&str>) -> Result<String, String> {
         &devices[next_idx]
     };
 
-    let _com = ComGuard::new();
+    let _com = ComGuard::sta();
     unsafe {
         let clsid = GUID::from_u128(0x870af99c_171d_4f9e_af0d_e63df40c2bc9);
         let iid = GUID::from_u128(0xf8679f50_850a_41cf_9c72_430f290290c8);
@@ -506,4 +487,27 @@ pub fn send_hotkey(keys: &[String]) -> Result<(), String> {
         SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_vk_maps_extended_punctuation_and_backspace() {
+        assert_eq!(parse_vk("Backspace"), Some((VK_BACK, false)));
+        assert_eq!(parse_vk("CapsLock"), Some((VK_CAPITAL, false)));
+        assert_eq!(parse_vk("/"), Some((VK_OEM_2, false)));
+        assert_eq!(parse_vk("-"), Some((VK_OEM_MINUS, false)));
+        assert_eq!(parse_vk("Left"), Some((VK_LEFT, true)));
+        assert_eq!(parse_vk("Win"), Some((VK_LWIN, true)));
+        assert_eq!(parse_vk("UnknownKeyName"), None);
+    }
+
+    #[test]
+    fn send_hotkey_rejects_unrecognized_key() {
+        let keys = vec!["Ctrl".to_string(), "NotARealKey".to_string()];
+        let err = send_hotkey(&keys).unwrap_err();
+        assert!(err.contains("지원하지 않는 키"));
+    }
 }

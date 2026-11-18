@@ -1,4 +1,5 @@
 use crate::config::get_data_dir;
+use crate::win_com::ComGuard;
 use image::{imageops::FilterType, RgbaImage};
 use serde::Serialize;
 use std::collections::hash_map::DefaultHasher;
@@ -20,8 +21,7 @@ use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_FLAGS_AND_ATTRIBUTES,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
-    COINIT_APARTMENTTHREADED, STGM_READ,
+    CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ,
 };
 use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
 use windows::Win32::UI::Shell::{
@@ -41,23 +41,6 @@ pub struct ResolvedDrop {
     pub proc_name: String,
     pub url: String,
     pub icon_path: Option<String>,
-}
-
-struct ComGuard(bool);
-impl ComGuard {
-    fn new() -> Self {
-        let should_uninit = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
-        Self(should_uninit)
-    }
-}
-impl Drop for ComGuard {
-    fn drop(&mut self) {
-        if self.0 {
-            unsafe {
-                CoUninitialize();
-            }
-        }
-    }
 }
 
 fn expand_env_vars(input: &str) -> String {
@@ -96,7 +79,7 @@ struct LnkData {
 }
 
 fn parse_lnk(lnk_path: &str) -> Result<LnkData, String> {
-    let _com = ComGuard::new();
+    let _com = ComGuard::sta();
     unsafe {
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
             .map_err(|e| format!("CoCreateInstance ShellLink: {e}"))?;
@@ -286,7 +269,7 @@ fn hicon_to_rgba(hicon: HICON) -> Result<RgbaImage, String> {
 }
 
 pub fn extract_icon_asset(source_path: &str, is_folder: bool) -> Result<String, String> {
-    let _com = ComGuard::new();
+    let _com = ComGuard::sta();
     let expanded = expand_env_vars(source_path);
     let data_dir = get_data_dir()?;
 

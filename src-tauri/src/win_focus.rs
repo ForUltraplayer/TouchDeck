@@ -1,4 +1,5 @@
 use crate::config::ButtonAction;
+use crate::win_com::ComGuard;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -8,10 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use windows::core::{Interface, HSTRING, PCWSTR, VARIANT};
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE};
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_LOCAL_SERVER,
-    COINIT_APARTMENTTHREADED,
-};
+use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_LOCAL_SERVER};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
@@ -519,8 +517,8 @@ fn find_explorer_for_folder(folder: &str) -> (Option<HWND>, HashSet<isize>) {
     let target = normalize_folder(folder);
     let mut matched = None;
 
+    let _com = ComGuard::sta();
     unsafe {
-        let should_uninit = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
         if let Ok(shell_wins) =
             CoCreateInstance::<_, IShellWindows>(&ShellWindows, None, CLSCTX_LOCAL_SERVER)
         {
@@ -547,9 +545,6 @@ fn find_explorer_for_folder(folder: &str) -> (Option<HWND>, HashSet<isize>) {
                     }
                 }
             }
-        }
-        if should_uninit {
-            CoUninitialize();
         }
     }
 

@@ -156,6 +156,23 @@ fn parse_semver(v: &str) -> (u32, u32, u32) {
     )
 }
 
+fn pick_portable_exe_asset(val: &Value) -> Option<String> {
+    let assets = val.get("assets").and_then(|v| v.as_array())?;
+    for asset in assets {
+        let name = asset
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if name.ends_with(".exe") && !name.contains("setup") && !name.contains("installer") {
+            if let Some(u) = asset.get("browser_download_url").and_then(|v| v.as_str()) {
+                return Some(u.to_string());
+            }
+        }
+    }
+    None
+}
+
 pub fn check_for_update() -> Result<UpdateInfo, String> {
     let api_url = format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest");
     let bytes = winhttp_get(&api_url, 2 * 1024 * 1024)?;
@@ -180,22 +197,7 @@ pub fn check_for_update() -> Result<UpdateInfo, String> {
         .unwrap_or("")
         .to_string();
 
-    let mut download_url = None;
-    if let Some(assets) = val.get("assets").and_then(|v| v.as_array()) {
-        for asset in assets {
-            let name = asset
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if name.ends_with(".exe") && !name.contains("setup") && !name.contains("installer") {
-                if let Some(u) = asset.get("browser_download_url").and_then(|v| v.as_str()) {
-                    download_url = Some(u.to_string());
-                    break;
-                }
-            }
-        }
-    }
+    let download_url = pick_portable_exe_asset(&val);
 
     Ok(UpdateInfo {
         current_version,
@@ -269,4 +271,31 @@ pub fn download_and_apply_update(app: &AppHandle, download_url: &str) -> Result<
 
     app.exit(0);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_semver_handles_prefix_and_prerelease() {
+        assert_eq!(parse_semver("v0.2.7"), (0, 2, 7));
+        assert_eq!(parse_semver("0.2.6-rc.1"), (0, 2, 6));
+        assert!(parse_semver("v0.2.7") > parse_semver("0.2.6"));
+    }
+
+    #[test]
+    fn pick_portable_exe_asset_skips_setup_installers() {
+        let release = json!({
+            "assets": [
+                { "name": "TouchDeck_0.2.7_x64-setup.exe", "browser_download_url": "https://example.com/setup.exe" },
+                { "name": "TouchDeck-v0.2.7-windows-x64.exe", "browser_download_url": "https://example.com/portable.exe" }
+            ]
+        });
+        assert_eq!(
+            pick_portable_exe_asset(&release).as_deref(),
+            Some("https://example.com/portable.exe")
+        );
+    }
 }

@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { flushSync } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -21,6 +20,7 @@ import { ButtonDock } from "./components/ButtonDock";
 import { ButtonEditorModal } from "./components/ButtonEditorModal";
 import { ButtonTile } from "./components/ButtonTile";
 import { SettingsDrawer } from "./components/SettingsDrawer";
+import { useDeckWindowLayout } from "./hooks/useDeckWindowLayout";
 import type {
   ButtonItem,
   DeckConfig,
@@ -54,23 +54,9 @@ export const App: React.FC = () => {
   const [pageIndex, setPageIndex] = useState(0);
   const [editMode, setEditMode] = useState(false);
   const [dockOpen, setDockOpen] = useState(false);
-  const [dockMounted, setDockMounted] = useState(false);
-  const [dockExpanded, setDockExpanded] = useState(false);
-  const [dockOnLeft, setDockOnLeft] = useState(false);
   const [editingSlot, setEditingSlot] = useState<number | null>(null);
   const [contextMenu, setContextMenu] = useState<{ slotIndex: number; x: number; y: number } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [closingModal, setClosingModal] = useState<
-    { kind: "settings" } | { kind: "editor"; slot: number } | null
-  >(null);
-  const [modalVisible, setModalVisible] = useState(false);
-  const [shellRect, setShellRect] = useState<{
-    width: number;
-    height: number;
-    tx: number;
-    ty: number;
-    animate: boolean;
-  } | null>(null);
   const [dropHoverSlot, setDropHoverSlot] = useState<number | null>(null);
   const [vaultHover, setVaultHover] = useState(false);
   const [swipeOffset, setSwipeOffset] = useState(0);
@@ -95,29 +81,10 @@ export const App: React.FC = () => {
   const swipeRef = useRef<{ startX: number; startY: number; swiping: boolean } | null>(null);
   const suppressClickUntilRef = useRef(0);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const moveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const animTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragNoActivateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const animSeqRef = useRef(0);
-  const prevLayoutRef = useRef<{
-    dockOpen: boolean;
-    modalOpen: boolean;
-    gridW: number;
-    gridH: number;
-    winW: number;
-    winH: number;
-  } | null>(null);
-  const activeModalRef = useRef<{ kind: "settings" } | { kind: "editor"; slot: number } | null>(null);
   const userHiddenRef = useRef(false);
-  const homePosRef = useRef<{ x: number; y: number } | null>(null);
-  const lastWinPosRef = useRef<{ x: number; y: number } | null>(null);
-  const programmaticMoveUntilRef = useRef(0);
-  const activeDockPhysWRef = useRef(0);
   const statsInFlightRef = useRef(false);
   const wantNoActivateRef = useRef(true);
-  const modalOpenRef = useRef(false);
-  const shellRectRef = useRef(shellRect);
-  shellRectRef.current = shellRect;
   const slotDragPendingRef = useRef<{
     fromSlot: number;
     label: string;
@@ -143,15 +110,35 @@ export const App: React.FC = () => {
     setTimeout(() => setToast((cur) => (cur === msg ? null : cur)), 2400);
   }, []);
 
+  const {
+    dockMounted,
+    dockExpanded,
+    dockOnLeft,
+    modalVisible,
+    shellRect,
+    renderedModal,
+    modalOpen,
+    syncHomeFromConfig,
+  } = useDeckWindowLayout({
+    config,
+    configRef,
+    setConfig,
+    dockOpen,
+    settingsOpen,
+    editingSlot,
+    headerH: HEADER_H,
+    footerH: FOOTER_H,
+    padX: PAD_X,
+    padY: PAD_Y,
+    dockW: DOCK_W,
+  });
+
   const reloadConfig = useCallback(async () => {
     const loaded = await api.getConfig();
     setLoadError(null);
-    homePosRef.current =
-      loaded.window.x !== null && loaded.window.y !== null
-        ? { x: loaded.window.x, y: loaded.window.y }
-        : null;
+    syncHomeFromConfig(loaded);
     setConfig(loaded);
-  }, []);
+  }, [syncHomeFromConfig]);
 
   // Initial config and Discord state load
   useEffect(() => {
@@ -334,13 +321,6 @@ export const App: React.FC = () => {
   }, [config !== null, config?.window.desktopLayer, config?.window.alwaysOnTop]);
 
   // Toggle WS_EX_NOACTIVATE so touching buttons doesn't steal focus from active apps
-  const modalOpen = settingsOpen || editingSlot !== null;
-  modalOpenRef.current = modalOpen;
-  if (settingsOpen) {
-    activeModalRef.current = { kind: "settings" };
-  } else if (editingSlot !== null) {
-    activeModalRef.current = { kind: "editor", slot: editingSlot };
-  }
   const wantNoActivate = !modalOpen && !editMode && !dockOpen;
   wantNoActivateRef.current = wantNoActivate;
   useEffect(() => {
@@ -351,6 +331,14 @@ export const App: React.FC = () => {
     }
     api.setNoActivate(wantNoActivate).catch(() => {});
   }, [config !== null, wantNoActivate]);
+
+  useEffect(() => {
+    return () => {
+      if (dragNoActivateTimerRef.current) {
+        clearTimeout(dragNoActivateTimerRef.current);
+      }
+    };
+  }, []);
 
   // Resolve relative asset paths -> absolute paths for convertFileSrc
   useEffect(() => {
@@ -388,410 +376,11 @@ export const App: React.FC = () => {
     });
   }, [config, assetMap]);
 
-  // Smoothly synchronize window bounds & CSS stage transitions without WebView2 resize flicker.
-  // When placed near right/bottom screen edges, expanding pushes left/up inside work area
-  // without overwriting the user's resting corner position, then glides back on close.
-  const gridCols = config?.grid.columns;
-  const gridRows = config?.grid.rows;
-  const gridCellSize = config?.grid.cellSize;
-  const gridGap = config?.grid.gap;
-
-  useEffect(() => {
-    if (
-      gridCols === undefined ||
-      gridRows === undefined ||
-      gridCellSize === undefined ||
-      gridGap === undefined
-    ) {
-      return;
-    }
-
-    const gridW = gridCols * gridCellSize + Math.max(0, gridCols - 1) * gridGap + PAD_X * 2;
-    const gridH =
-      gridRows * gridCellSize + Math.max(0, gridRows - 1) * gridGap + HEADER_H + FOOTER_H + PAD_Y * 2;
-    const extraDockW = dockOpen ? DOCK_W : 0;
-    const curWinW = modalOpen ? Math.max(gridW + extraDockW, 600) : gridW + extraDockW;
-    const curWinH = modalOpen ? Math.max(gridH, 680) : gridH;
-    const prev = prevLayoutRef.current;
-
-    // Never resize while settings/editor modal stays open so sliders do not jitter under the cursor.
-    if (modalOpen && prev?.modalOpen) {
-      return;
-    }
-
-    prevLayoutRef.current = { dockOpen, modalOpen, gridW, gridH, winW: curWinW, winH: curWinH };
-
-    if (animTimerRef.current) {
-      clearTimeout(animTimerRef.current);
-      animTimerRef.current = null;
-    }
-    if (moveTimerRef.current) {
-      clearTimeout(moveTimerRef.current);
-      moveTimerRef.current = null;
-    }
-
-    const seq = ++animSeqRef.current;
-    const anchorX = homePosRef.current?.x ?? null;
-    const anchorY = homePosRef.current?.y ?? null;
-
-    const markProgrammaticMove = () => {
-      programmaticMoveUntilRef.current = Date.now() + 700;
-    };
-
-    const run = async () => {
-      if (!prev) {
-        markProgrammaticMove();
-        const res = await api.syncWindowBounds(
-          anchorX,
-          anchorY,
-          gridW,
-          gridH,
-          0,
-          gridW,
-          gridH,
-          true
-        );
-        if (animSeqRef.current !== seq) return;
-        lastWinPosRef.current = { x: res.x, y: res.y };
-        homePosRef.current = { x: res.x, y: res.y };
-        activeDockPhysWRef.current = 0;
-        return;
-      }
-
-      // Opening modal (settings or button editor)
-      if (modalOpen && !prev.modalOpen) {
-        const targetW = Math.max(gridW + extraDockW, 600);
-        const targetH = Math.max(gridH, 680);
-        const plan = await api.syncWindowBounds(
-          anchorX,
-          anchorY,
-          gridW,
-          gridH,
-          extraDockW,
-          targetW,
-          targetH,
-          false
-        );
-        if (animSeqRef.current !== seq) return;
-
-        const midShell = shellRectRef.current;
-        const curPos = lastWinPosRef.current ?? { x: plan.baseX, y: plan.baseY };
-        const startW = midShell ? midShell.width : prev.dockOpen ? prev.gridW + DOCK_W : prev.gridW;
-        const startH = midShell ? midShell.height : prev.gridH;
-        const startTx =
-          (curPos.x - plan.x) / plan.scale + (midShell ? midShell.tx : 0);
-        const startTy =
-          (curPos.y - plan.y) / plan.scale + (midShell ? midShell.ty : 0);
-
-        flushSync(() => {
-          setClosingModal(null);
-          setDockOnLeft(plan.dockOnLeft);
-          if (dockOpen) {
-            setDockMounted(true);
-            setDockExpanded(true);
-          }
-          setModalVisible(false);
-          setShellRect({ width: startW, height: startH, tx: startTx, ty: startTy, animate: false });
-        });
-
-        markProgrammaticMove();
-        const res = await api.syncWindowBounds(
-          anchorX,
-          anchorY,
-          gridW,
-          gridH,
-          extraDockW,
-          targetW,
-          targetH,
-          true
-        );
-        if (animSeqRef.current !== seq) return;
-        lastWinPosRef.current = { x: res.x, y: res.y };
-        activeDockPhysWRef.current = res.dockPhysW;
-
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            if (animSeqRef.current !== seq) return;
-            setShellRect({ width: targetW, height: targetH, tx: 0, ty: 0, animate: true });
-            setModalVisible(true);
-          });
-        });
-        return;
-      }
-
-      // Closing modal (back to dock or resting grid)
-      if (!modalOpen && prev.modalOpen) {
-        const targetW = gridW + extraDockW;
-        const targetH = gridH;
-        const snapshot = activeModalRef.current;
-        const plan = await api.syncWindowBounds(
-          anchorX,
-          anchorY,
-          gridW,
-          gridH,
-          extraDockW,
-          targetW,
-          targetH,
-          false
-        );
-        if (animSeqRef.current !== seq) return;
-
-        const growsPastModal = targetW > prev.winW || targetH > prev.winH;
-        if (growsPastModal) {
-          // If grid was enlarged past modal window bounds, expand OS window first so the grid never clips
-          const curPos = lastWinPosRef.current ?? { x: plan.x, y: plan.y };
-          const startTx = (curPos.x - plan.x) / plan.scale;
-          const startTy = (curPos.y - plan.y) / plan.scale;
-
-          flushSync(() => {
-            if (snapshot) setClosingModal(snapshot);
-            setDockOnLeft(plan.dockOnLeft);
-            if (dockOpen) {
-              setDockMounted(true);
-              setDockExpanded(true);
-            } else {
-              setDockExpanded(false);
-            }
-            setModalVisible(true);
-            setShellRect({
-              width: prev.winW,
-              height: prev.winH,
-              tx: startTx,
-              ty: startTy,
-              animate: false,
-            });
-          });
-
-          markProgrammaticMove();
-          const grown = await api.syncWindowBounds(
-            anchorX,
-            anchorY,
-            gridW,
-            gridH,
-            extraDockW,
-            targetW,
-            targetH,
-            true
-          );
-          if (animSeqRef.current !== seq) return;
-          lastWinPosRef.current = { x: grown.x, y: grown.y };
-          activeDockPhysWRef.current = grown.dockPhysW;
-
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              if (animSeqRef.current !== seq) return;
-              setModalVisible(false);
-              setShellRect({ width: targetW, height: targetH, tx: 0, ty: 0, animate: true });
-            });
-          });
-
-          animTimerRef.current = setTimeout(() => {
-            if (animSeqRef.current !== seq) return;
-            activeModalRef.current = null;
-            setClosingModal(null);
-            if (!dockOpen) setDockMounted(false);
-            setShellRect(null);
-            if (!dockOpen) {
-              homePosRef.current = { x: grown.x, y: grown.y };
-            }
-          }, 240);
-          return;
-        }
-
-        const curPos = lastWinPosRef.current ?? { x: plan.x, y: plan.y };
-        const closeTx = (plan.x - curPos.x) / plan.scale;
-        const closeTy = (plan.y - curPos.y) / plan.scale;
-
-        flushSync(() => {
-          if (snapshot) setClosingModal(snapshot);
-          setDockOnLeft(plan.dockOnLeft);
-          if (dockOpen) {
-            setDockMounted(true);
-            setDockExpanded(true);
-          } else {
-            setDockExpanded(false);
-          }
-          setModalVisible(false);
-          setShellRect({ width: targetW, height: targetH, tx: closeTx, ty: closeTy, animate: true });
-        });
-
-        animTimerRef.current = setTimeout(async () => {
-          if (animSeqRef.current !== seq) return;
-          activeModalRef.current = null;
-          flushSync(() => {
-            setClosingModal(null);
-            if (!dockOpen) setDockMounted(false);
-            setShellRect(null);
-          });
-          markProgrammaticMove();
-          const res = await api.syncWindowBounds(
-            anchorX,
-            anchorY,
-            gridW,
-            gridH,
-            extraDockW,
-            targetW,
-            targetH,
-            true
-          );
-          if (animSeqRef.current !== seq) return;
-          lastWinPosRef.current = { x: res.x, y: res.y };
-          activeDockPhysWRef.current = res.dockPhysW;
-          if (!dockOpen) {
-            homePosRef.current = { x: res.x, y: res.y };
-          }
-        }, 230);
-        return;
-      }
-
-      // Opening dock (without modal)
-      if (dockOpen && !prev.dockOpen) {
-        const plan = await api.syncWindowBounds(
-          anchorX,
-          anchorY,
-          gridW,
-          gridH,
-          DOCK_W,
-          gridW + DOCK_W,
-          gridH,
-          false
-        );
-        if (animSeqRef.current !== seq) return;
-
-        flushSync(() => {
-          setShellRect(null);
-          setDockOnLeft(plan.dockOnLeft);
-          setDockMounted(true);
-          setDockExpanded(false);
-        });
-
-        markProgrammaticMove();
-        const res = await api.syncWindowBounds(
-          anchorX,
-          anchorY,
-          gridW,
-          gridH,
-          DOCK_W,
-          gridW + DOCK_W,
-          gridH,
-          true
-        );
-        if (animSeqRef.current !== seq) return;
-        lastWinPosRef.current = { x: res.x, y: res.y };
-        activeDockPhysWRef.current = res.dockPhysW;
-
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            if (animSeqRef.current !== seq) return;
-            setDockExpanded(true);
-          });
-        });
-        return;
-      }
-
-      // Closing dock (without modal)
-      if (!dockOpen && prev.dockOpen) {
-        setDockExpanded(false);
-        animTimerRef.current = setTimeout(async () => {
-          if (animSeqRef.current !== seq) return;
-          flushSync(() => {
-            setDockMounted(false);
-            setShellRect(null);
-          });
-          markProgrammaticMove();
-          const res = await api.syncWindowBounds(
-            anchorX,
-            anchorY,
-            gridW,
-            gridH,
-            0,
-            gridW,
-            gridH,
-            true
-          );
-          if (animSeqRef.current !== seq) return;
-          lastWinPosRef.current = { x: res.x, y: res.y };
-          activeDockPhysWRef.current = 0;
-          homePosRef.current = { x: res.x, y: res.y };
-        }, 230);
-        return;
-      }
-
-      // Grid layout changed directly while modal is closed
-      markProgrammaticMove();
-      const res = await api.syncWindowBounds(
-        anchorX,
-        anchorY,
-        gridW,
-        gridH,
-        extraDockW,
-        gridW + extraDockW,
-        gridH,
-        true
-      );
-      if (animSeqRef.current !== seq) return;
-      lastWinPosRef.current = { x: res.x, y: res.y };
-      activeDockPhysWRef.current = res.dockPhysW;
-      setDockOnLeft(res.dockOnLeft);
-      if (!dockOpen) {
-        homePosRef.current = { x: res.x, y: res.y };
-      }
-    };
-
-    run().catch(() => {});
-  }, [gridCols, gridRows, gridCellSize, gridGap, modalOpen, dockOpen]);
-
   // Sync alwaysOnTop changes
   useEffect(() => {
     if (!config) return;
     getCurrentWindow().setAlwaysOnTop(config.window.alwaysOnTop).catch(() => {});
   }, [config?.window.alwaysOnTop]);
-
-  // Save window position only on genuine manual drags (never during locked/modal/programmatic shifts)
-  useEffect(() => {
-    const win = getCurrentWindow();
-    const unlistenPromise = win.onMoved(({ payload }) => {
-      const cur = configRef.current;
-      if (
-        !cur ||
-        cur.window.locked ||
-        modalOpenRef.current ||
-        activeModalRef.current !== null ||
-        Date.now() < programmaticMoveUntilRef.current
-      ) {
-        return;
-      }
-      if (moveTimerRef.current) clearTimeout(moveTimerRef.current);
-      moveTimerRef.current = setTimeout(() => {
-        const latest = configRef.current;
-        if (
-          !latest ||
-          latest.window.locked ||
-          modalOpenRef.current ||
-          activeModalRef.current !== null ||
-          Date.now() < programmaticMoveUntilRef.current
-        ) {
-          return;
-        }
-        lastWinPosRef.current = { x: payload.x, y: payload.y };
-        const anchorX = payload.x + activeDockPhysWRef.current;
-        const anchorY = payload.y;
-        homePosRef.current = { x: anchorX, y: anchorY };
-        const next: DeckConfig = {
-          ...latest,
-          window: { ...latest.window, x: anchorX, y: anchorY },
-        };
-        setConfig(next);
-        api.saveConfig(next).catch(() => {});
-      }, 400);
-    });
-    return () => {
-      if (moveTimerRef.current) clearTimeout(moveTimerRef.current);
-      if (animTimerRef.current) clearTimeout(animTimerRef.current);
-      if (dragNoActivateTimerRef.current) clearTimeout(dragNoActivateTimerRef.current);
-      unlistenPromise.then((fn) => fn());
-    };
-  }, []);
 
   const persistConfig = useCallback(
     (next: DeckConfig) => {
@@ -1483,12 +1072,6 @@ export const App: React.FC = () => {
     HEADER_H +
     FOOTER_H +
     PAD_Y * 2;
-  const renderedModal =
-    editingSlot !== null
-      ? ({ kind: "editor", slot: editingSlot } as const)
-      : settingsOpen
-      ? ({ kind: "settings" } as const)
-      : closingModal;
   const stageAlignRight = !shellRect && dockOnLeft;
 
   return (

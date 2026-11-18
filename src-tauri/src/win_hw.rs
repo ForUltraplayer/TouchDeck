@@ -1,3 +1,4 @@
+use crate::win_com::ComGuard;
 use serde::Serialize;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6,8 +7,8 @@ use std::time::{Duration, Instant};
 use windows::core::{w, BSTR, PCSTR, VARIANT};
 use windows::Win32::Foundation::{FILETIME, HMODULE};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoSetProxyBlanket, CoUninitialize, CLSCTX_INPROC_SERVER,
-    COINIT_MULTITHREADED, EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE,
+    CoCreateInstance, CoSetProxyBlanket, CLSCTX_INPROC_SERVER, EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL,
+    RPC_C_IMP_LEVEL_IMPERSONATE,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Performance::{
@@ -320,9 +321,9 @@ static TEMP_CACHE: Mutex<Option<TempCache>> = Mutex::new(None);
 static TEMP_REFRESHING: AtomicBool = AtomicBool::new(false);
 
 fn query_wmi_cpu_temp() -> Option<i32> {
+    let _com = ComGuard::mta();
     unsafe {
-        let should_uninit = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
-        let res = (|| -> Option<i32> {
+        (|| -> Option<i32> {
             let locator: IWbemLocator =
                 CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER).ok()?;
 
@@ -433,11 +434,7 @@ fn query_wmi_cpu_temp() -> Option<i32> {
                 }
             }
             None
-        })();
-        if should_uninit {
-            CoUninitialize();
-        }
-        res
+        })()
     }
 }
 

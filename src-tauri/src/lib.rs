@@ -1,4 +1,5 @@
 mod config;
+mod win_com;
 mod win_discord;
 mod win_focus;
 mod win_hw;

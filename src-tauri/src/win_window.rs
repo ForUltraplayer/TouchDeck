@@ -1,3 +1,4 @@
+use crate::win_com::ComGuard;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Once;
@@ -9,10 +10,7 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
     MONITOR_DEFAULTTONULL,
 };
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
-    COINIT_APARTMENTTHREADED,
-};
+use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER};
 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, IsIconic,
@@ -62,25 +60,18 @@ pub fn set_autostart(enabled: bool) -> Result<bool, String> {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
 
+    let _com = ComGuard::sta();
     unsafe {
-        let should_uninit = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
-        let res = (|| -> Result<(), String> {
-            let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
-                .map_err(|e| e.to_string())?;
-            link.SetPath(&HSTRING::from(exe_path.to_string_lossy().as_ref()))
-                .map_err(|e| e.to_string())?;
-            link.SetWorkingDirectory(&HSTRING::from(exe_dir.as_str()))
-                .map_err(|e| e.to_string())?;
-            let persist: IPersistFile = link.cast().map_err(|e| e.to_string())?;
-            persist
-                .Save(&HSTRING::from(lnk_path.to_string_lossy().as_ref()), true)
-                .map_err(|e| e.to_string())?;
-            Ok(())
-        })();
-        if should_uninit {
-            CoUninitialize();
-        }
-        res?;
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+            .map_err(|e| e.to_string())?;
+        link.SetPath(&HSTRING::from(exe_path.to_string_lossy().as_ref()))
+            .map_err(|e| e.to_string())?;
+        link.SetWorkingDirectory(&HSTRING::from(exe_dir.as_str()))
+            .map_err(|e| e.to_string())?;
+        let persist: IPersistFile = link.cast().map_err(|e| e.to_string())?;
+        persist
+            .Save(&HSTRING::from(lnk_path.to_string_lossy().as_ref()), true)
+            .map_err(|e| e.to_string())?;
     }
     Ok(true)
 }
