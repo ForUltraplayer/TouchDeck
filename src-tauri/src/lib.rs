@@ -261,6 +261,46 @@ fn clamp_window_pos(x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
 }
 
 #[tauri::command]
+fn sync_window_bounds(
+    window: tauri::WebviewWindow,
+    anchor_x: Option<i32>,
+    anchor_y: Option<i32>,
+    grid_w: f64,
+    grid_h: f64,
+    dock_w: f64,
+    target_w: f64,
+    target_h: f64,
+    apply: Option<bool>,
+) -> Result<win_window::WindowBoundsResult, String> {
+    let apply = apply.unwrap_or(true);
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?.0 as isize;
+    let cur = window.outer_position().map(|p| (p.x, p.y)).unwrap_or((100, 100));
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let mut res = win_window::sync_window_bounds(
+        hwnd, cur, scale, anchor_x, anchor_y, grid_w, grid_h, dock_w, target_w, target_h, apply,
+    )?;
+    if apply {
+        let new_scale = window.scale_factor().unwrap_or(scale);
+        if (new_scale - scale).abs() > 0.01 {
+            res = win_window::sync_window_bounds(
+                hwnd,
+                (res.x, res.y),
+                new_scale,
+                anchor_x,
+                anchor_y,
+                grid_w,
+                grid_h,
+                dock_w,
+                target_w,
+                target_h,
+                true,
+            )?;
+        }
+    }
+    Ok(res)
+}
+
+#[tauri::command]
 fn set_desktop_layer(
     window: tauri::WebviewWindow,
     enabled: bool,
@@ -539,6 +579,7 @@ pub fn run() {
             get_running_status,
             set_no_activate,
             clamp_window_pos,
+            sync_window_bounds,
             set_desktop_layer,
             set_user_hidden,
             tick_desktop_visibility,

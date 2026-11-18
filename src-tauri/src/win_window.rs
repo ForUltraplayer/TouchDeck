@@ -4,7 +4,7 @@ use std::sync::Once;
 use std::thread;
 use std::time::Duration;
 use windows::core::{w, Interface, HSTRING};
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY, MONITOR_DEFAULTTONULL,
 };
@@ -106,28 +106,161 @@ pub fn set_no_activate(hwnd_raw: isize, enabled: bool) {
     }
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowBoundsResult {
+    pub x: i32,
+    pub y: i32,
+    pub base_x: i32,
+    pub base_y: i32,
+    pub dock_on_left: bool,
+    pub dock_phys_w: i32,
+    pub scale: f64,
+}
+
+unsafe fn get_monitor_work_area(x: i32, y: i32, w: i32, h: i32) -> (RECT, bool) {
+    let center = POINT {
+        x: x + w / 2,
+        y: y + h / 2,
+    };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let mon = MonitorFromPoint(center, MONITOR_DEFAULTTONULL);
+    if !mon.is_invalid() && GetMonitorInfoW(mon, &mut info).as_bool() {
+        return (info.rcWork, false);
+    }
+    let primary = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+    if GetMonitorInfoW(primary, &mut info).as_bool() {
+        return (info.rcWork, true);
+    }
+    (
+        RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        },
+        true,
+    )
+}
+
 pub fn clamp_window_position(x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
     unsafe {
-        let center = POINT {
-            x: x + w / 2,
-            y: y + h / 2,
-        };
-        let mon = MonitorFromPoint(center, MONITOR_DEFAULTTONULL);
-        if !mon.is_invalid() {
-            return (x, y);
-        }
-        let primary = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if GetMonitorInfoW(primary, &mut info).as_bool() {
-            let rc = info.rcWork;
+        let (rc, recentered) = get_monitor_work_area(x, y, w, h);
+        if recentered {
             let cx = rc.left + ((rc.right - rc.left) - w).max(0) / 2;
             let cy = rc.top + ((rc.bottom - rc.top) - h).max(0) / 2;
             return (cx, cy);
         }
-        (100, 100)
+        let max_x = (rc.right - w).max(rc.left);
+        let max_y = (rc.bottom - h).max(rc.top);
+        (x.clamp(rc.left, max_x), y.clamp(rc.top, max_y))
+    }
+}
+
+fn compute_window_bounds(
+    rc: RECT,
+    recentered: bool,
+    raw_x: i32,
+    raw_y: i32,
+    phys_grid_w: i32,
+    phys_grid_h: i32,
+    phys_dock_w: i32,
+    phys_target_w: i32,
+    phys_target_h: i32,
+    scale: f64,
+) -> WindowBoundsResult {
+    let (base_x, base_y) = if recentered {
+        let cx = rc.left + ((rc.right - rc.left) - phys_grid_w).max(0) / 2;
+        let cy = rc.top + ((rc.bottom - rc.top) - phys_grid_h).max(0) / 2;
+        (cx, cy)
+    } else {
+        (raw_x, raw_y)
+    };
+
+    // If expanding the dock to the right would overflow this monitor's work area,
+    // expand the dock to the left of the grid instead so the grid stays anchored.
+    let dock_on_left = phys_dock_w > 0 && (base_x + phys_grid_w + phys_dock_w > rc.right);
+
+    let desired_x = if dock_on_left {
+        base_x - phys_dock_w
+    } else {
+        base_x
+    };
+    let desired_y = base_y;
+
+    let max_x = (rc.right - phys_target_w).max(rc.left);
+    let max_y = (rc.bottom - phys_target_h).max(rc.top);
+    let final_x = desired_x.clamp(rc.left, max_x);
+    let final_y = desired_y.clamp(rc.top, max_y);
+
+    WindowBoundsResult {
+        x: final_x,
+        y: final_y,
+        base_x,
+        base_y,
+        dock_on_left,
+        dock_phys_w: if dock_on_left { phys_dock_w } else { 0 },
+        scale,
+    }
+}
+
+pub fn sync_window_bounds(
+    hwnd_raw: isize,
+    cur_pos: (i32, i32),
+    scale: f64,
+    anchor_x: Option<i32>,
+    anchor_y: Option<i32>,
+    grid_w: f64,
+    grid_h: f64,
+    dock_w: f64,
+    target_w: f64,
+    target_h: f64,
+    apply: bool,
+) -> Result<WindowBoundsResult, String> {
+    let scale = if scale > 0.0 { scale } else { 1.0 };
+    let phys_grid_w = (grid_w * scale).round() as i32;
+    let phys_grid_h = (grid_h * scale).round() as i32;
+    let phys_dock_w = (dock_w * scale).round() as i32;
+    let phys_target_w = (target_w * scale).round() as i32;
+    let phys_target_h = (target_h * scale).round() as i32;
+
+    let raw_x = anchor_x.unwrap_or(cur_pos.0);
+    let raw_y = anchor_y.unwrap_or(cur_pos.1);
+
+    unsafe {
+        let (rc, recentered) = get_monitor_work_area(raw_x, raw_y, phys_grid_w, phys_grid_h);
+        let res = compute_window_bounds(
+            rc,
+            recentered,
+            raw_x,
+            raw_y,
+            phys_grid_w,
+            phys_grid_h,
+            phys_dock_w,
+            phys_target_w,
+            phys_target_h,
+            scale,
+        );
+
+        if apply {
+            let hwnd = HWND(hwnd_raw as *mut _);
+            if !hwnd.0.is_null() && IsWindow(hwnd).as_bool() {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    res.x,
+                    res.y,
+                    phys_target_w,
+                    phys_target_h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
+
+        Ok(res)
     }
 }
 
@@ -242,5 +375,68 @@ pub fn tick_desktop_visibility(hwnd_raw: isize, always_on_top: bool) {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn work_rect() -> RECT {
+        RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        }
+    }
+
+    #[test]
+    fn dock_opens_to_left_when_anchored_on_right_corner() {
+        let rc = work_rect();
+        // 568px wide grid placed near right corner at x=1340 (right edge=1908 <= 1920)
+        let res = compute_window_bounds(rc, false, 1340, 20, 568, 500, 256, 824, 500, 1.0);
+        assert!(res.dock_on_left);
+        assert_eq!(res.dock_phys_w, 256);
+        assert_eq!(res.x, 1084);
+        assert_eq!(res.y, 20);
+        // Right edge stays anchored at 1908
+        assert_eq!(res.x + 824, 1908);
+    }
+
+    #[test]
+    fn dock_opens_to_right_when_anchored_on_left_corner() {
+        let rc = work_rect();
+        let res = compute_window_bounds(rc, false, 20, 20, 568, 500, 256, 824, 500, 1.0);
+        assert!(!res.dock_on_left);
+        assert_eq!(res.dock_phys_w, 0);
+        assert_eq!(res.x, 20);
+        assert_eq!(res.y, 20);
+    }
+
+    #[test]
+    fn modal_pushes_left_and_up_from_bottom_right_corner() {
+        let rc = work_rect();
+        // Small 400x350 grid placed at bottom-right (1500, 680), opening 600x680 modal
+        let res = compute_window_bounds(rc, false, 1500, 680, 400, 350, 0, 600, 680, 1.0);
+        assert!(!res.dock_on_left);
+        assert_eq!(res.x, 1320); // 1920 - 600
+        assert_eq!(res.y, 360); // 1040 - 680
+    }
+
+    #[test]
+    fn closing_dock_or_modal_restores_anchor_position() {
+        let rc = work_rect();
+        let res = compute_window_bounds(rc, false, 1500, 680, 400, 350, 0, 400, 350, 1.0);
+        assert_eq!(res.x, 1500);
+        assert_eq!(res.y, 680);
+    }
+
+    #[test]
+    fn disconnected_monitor_recenters_on_primary_work_area() {
+        let rc = work_rect();
+        let res = compute_window_bounds(rc, true, 4000, 3000, 568, 500, 0, 568, 500, 1.0);
+        assert_eq!(res.x, (1920 - 568) / 2);
+        assert_eq!(res.y, (1040 - 500) / 2);
     }
 }
