@@ -1,0 +1,86 @@
+name: Release TouchDeck
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.2.6). Defaults to v<package.json version>."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Run Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build TouchDeck single executable
+        run: npm run tauri build -- --no-bundle
+
+      - name: Package artifacts and publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ($env:REF_TYPE -eq "tag" -and $env:REF_NAME) {
+            $tag = $env:REF_NAME
+          } elseif ($env:INPUT_TAG) {
+            $tag = $env:INPUT_TAG.Trim()
+          } else {
+            $pkg = Get-Content "package.json" -Raw | ConvertFrom-Json
+            $tag = "v$($pkg.version)"
+          }
+
+          $exeSrc = "src-tauri/target/release/touchdeck.exe"
+          if (-not (Test-Path $exeSrc)) {
+            throw "Built executable not found at $exeSrc"
+          }
+
+          $stage = Join-Path $env:RUNNER_TEMP "release-$tag"
+          $portableDir = Join-Path $stage "portable"
+          New-Item -ItemType Directory -Path (Join-Path $portableDir "data") -Force | Out-Null
+
+          $exeOut = Join-Path $stage "TouchDeck-$tag-windows-x64.exe"
+          $zipOut = Join-Path $stage "TouchDeck-$tag-windows-x64-portable.zip"
+          Copy-Item $exeSrc $exeOut -Force
+          Copy-Item $exeSrc (Join-Path $portableDir "TouchDeck.exe") -Force
+          Compress-Archive -Path "$portableDir\*" -DestinationPath $zipOut -Force
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $exeOut $zipOut --clobber
+          } else {
+            gh release create $tag $exeOut $zipOut --title "TouchDeck $tag" --generate-notes
+          }
