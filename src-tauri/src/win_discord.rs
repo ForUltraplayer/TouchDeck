@@ -1,4 +1,4 @@
-use crate::config::{load_config, save_config, DiscordConfig};
+use crate::config::{load_config, DiscordConfig};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs::{File, OpenOptions};
@@ -280,10 +280,9 @@ fn refresh_oauth(client_id: &str, client_secret: &str, refresh_token: &str) -> R
     Ok((access, refresh))
 }
 
-fn save_discord_cfg(dc: DiscordConfig) {
-    if let Ok(mut cfg) = load_config() {
-        cfg.discord = dc;
-        let _ = save_config(&cfg);
+fn save_discord_cfg(app: &AppHandle, dc: DiscordConfig) {
+    if let Ok(saved) = crate::config::update_discord_config(|cur| *cur = dc) {
+        let _ = app.emit("discord-config-updated", &saved);
     }
 }
 
@@ -314,7 +313,7 @@ fn run_worker(app: AppHandle, state_lock: Arc<Mutex<DiscordState>>, rx: Receiver
                     dc.client_secret = client_secret.trim().to_string();
                     dc.access_token.clear();
                     dc.refresh_token.clear();
-                    save_discord_cfg(dc);
+                    save_discord_cfg(&app, dc);
                     pipe = None;
                     pending_auth = true;
                     tried_refresh = false;
@@ -335,7 +334,7 @@ fn run_worker(app: AppHandle, state_lock: Arc<Mutex<DiscordState>>, rx: Receiver
                     let mut dc = load_config().map(|c| c.discord).unwrap_or_default();
                     dc.access_token.clear();
                     dc.refresh_token.clear();
-                    save_discord_cfg(dc);
+                    save_discord_cfg(&app, dc);
                     update_state(&app, &state_lock, |s| {
                         *s = DiscordState::default();
                     });
@@ -462,7 +461,7 @@ fn run_worker(app: AppHandle, state_lock: Arc<Mutex<DiscordState>>, rx: Receiver
                                         {
                                             dc.access_token = acc.clone();
                                             dc.refresh_token = ref_t;
-                                            save_discord_cfg(dc);
+                                            save_discord_cfg(&app, dc);
                                             let _ = write_frame(
                                                 p,
                                                 1,
@@ -488,7 +487,7 @@ fn run_worker(app: AppHandle, state_lock: Arc<Mutex<DiscordState>>, rx: Receiver
                                         Ok((acc, ref_t)) => {
                                             dc.access_token = acc.clone();
                                             dc.refresh_token = ref_t;
-                                            save_discord_cfg(dc);
+                                            save_discord_cfg(&app, dc);
                                             let _ = write_frame(
                                                 p,
                                                 1,

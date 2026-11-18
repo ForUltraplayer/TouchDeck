@@ -194,7 +194,7 @@ export const ButtonTile: React.FC<Props> = React.memo(({
           width: cellSize,
           height: cellSize,
           borderRadius,
-          touchAction: editMode ? "none" : "pan-y",
+          touchAction: "none",
         }}
         onClick={() => {
           if (editMode || !locked) onEdit(slotIndex);
@@ -216,7 +216,7 @@ export const ButtonTile: React.FC<Props> = React.memo(({
     width: cellSize,
     height: cellSize,
     borderRadius,
-    touchAction: editMode ? "none" : "pan-y",
+    touchAction: "none",
   };
   if (hasCustomBg || buttonStyle === "solid") {
     tileStyle.backgroundColor = hexToRgba(

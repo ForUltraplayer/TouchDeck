@@ -43,19 +43,19 @@ pub struct ResolvedDrop {
     pub icon_path: Option<String>,
 }
 
-struct ComGuard;
+struct ComGuard(bool);
 impl ComGuard {
     fn new() -> Self {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        }
-        Self
+        let should_uninit = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
+        Self(should_uninit)
     }
 }
 impl Drop for ComGuard {
     fn drop(&mut self) {
-        unsafe {
-            CoUninitialize();
+        if self.0 {
+            unsafe {
+                CoUninitialize();
+            }
         }
     }
 }

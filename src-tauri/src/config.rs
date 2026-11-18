@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -450,19 +453,20 @@ pub fn is_portable_mode() -> bool {
     false
 }
 
-pub fn load_config() -> Result<DeckConfig, String> {
-    let dir = get_data_dir()?;
-    let cfg_path = dir.join("config.json");
-    if !cfg_path.exists() {
-        let def = DeckConfig::default();
-        save_config(&def)?;
-        return Ok(def);
+fn sanitize_config(mut cfg: DeckConfig) -> DeckConfig {
+    cfg.grid.columns = cfg.grid.columns.clamp(2, 10);
+    cfg.grid.rows = cfg.grid.rows.clamp(1, 8);
+    cfg.grid.cell_size = cfg.grid.cell_size.clamp(60, 200);
+    cfg.grid.gap = cfg.grid.gap.clamp(0, 32);
+    if cfg.pages.is_empty() {
+        cfg.pages = DeckConfig::default().pages;
+    } else if cfg.pages[0].id.trim().is_empty() {
+        cfg.pages[0].id = "page-1".into();
     }
-    let text = fs::read_to_string(&cfg_path).map_err(|e| format!("read config failed: {e}"))?;
-    serde_json::from_str(&text).map_err(|e| format!("parse config failed: {e}"))
+    cfg
 }
 
-pub fn save_config(cfg: &DeckConfig) -> Result<(), String> {
+fn save_config_unlocked(cfg: &DeckConfig) -> Result<(), String> {
     let dir = get_data_dir()?;
     let cfg_path = dir.join("config.json");
     let tmp_path = dir.join("config.json.tmp");
@@ -470,6 +474,63 @@ pub fn save_config(cfg: &DeckConfig) -> Result<(), String> {
     fs::write(&tmp_path, json).map_err(|e| e.to_string())?;
     fs::rename(&tmp_path, &cfg_path).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn load_config_unlocked() -> Result<DeckConfig, String> {
+    let dir = get_data_dir()?;
+    let cfg_path = dir.join("config.json");
+    if !cfg_path.exists() {
+        let def = DeckConfig::default();
+        save_config_unlocked(&def)?;
+        return Ok(def);
+    }
+    match fs::read_to_string(&cfg_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<DeckConfig>(&text).ok())
+    {
+        Some(cfg) => Ok(sanitize_config(cfg)),
+        None => {
+            let bak_path = dir.join("config.json.bak");
+            let _ = fs::copy(&cfg_path, &bak_path);
+            let def = DeckConfig::default();
+            save_config_unlocked(&def)?;
+            Ok(def)
+        }
+    }
+}
+
+pub fn load_config() -> Result<DeckConfig, String> {
+    let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    load_config_unlocked()
+}
+
+pub fn save_config(cfg: &DeckConfig) -> Result<(), String> {
+    let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    save_config_unlocked(cfg)
+}
+
+pub fn save_config_from_ui(cfg: &DeckConfig) -> Result<(), String> {
+    let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut merged = sanitize_config(cfg.clone());
+    if merged.discord.access_token.is_empty() && merged.discord.refresh_token.is_empty() {
+        if let Ok(disk) = load_config_unlocked() {
+            if !disk.discord.access_token.is_empty() || !disk.discord.refresh_token.is_empty() {
+                merged.discord = disk.discord;
+            } else if merged.discord.client_id.is_empty() && !disk.discord.client_id.is_empty() {
+                merged.discord.client_id = disk.discord.client_id;
+                merged.discord.client_secret = disk.discord.client_secret;
+            }
+        }
+    }
+    save_config_unlocked(&merged)
+}
+
+pub fn update_discord_config<F: FnOnce(&mut DiscordConfig)>(f: F) -> Result<DiscordConfig, String> {
+    let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cfg = load_config_unlocked()?;
+    f(&mut cfg.discord);
+    save_config_unlocked(&cfg)?;
+    Ok(cfg.discord)
 }
 
 pub fn copy_image_to_assets(source_path: &str, prefix: &str) -> Result<String, String> {

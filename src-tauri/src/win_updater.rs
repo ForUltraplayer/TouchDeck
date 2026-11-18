@@ -188,7 +188,7 @@ pub fn check_for_update() -> Result<UpdateInfo, String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            if name.ends_with(".exe") {
+            if name.ends_with(".exe") && !name.contains("setup") && !name.contains("installer") {
                 if let Some(u) = asset.get("browser_download_url").and_then(|v| v.as_str()) {
                     download_url = Some(u.to_string());
                     break;
@@ -233,17 +233,22 @@ pub fn download_and_apply_update(app: &AppHandle, download_url: &str) -> Result<
     let bat_path = std::env::temp_dir().join("touchdeck_apply_update.cmd");
     let script = format!(
         "@echo off\r\n\
-         set /a tries=0\r\n\
+         chcp 65001 >nul\r\n\
+         set /a wait_tries=0\r\n\
          :wait\r\n\
-         timeout /t 1 /nobreak >nul\r\n\
+         ping 127.0.0.1 -n 2 >nul\r\n\
          tasklist /FI \"PID eq {pid}\" 2>nul | find \"{pid}\" >nul\r\n\
-         if not errorlevel 1 goto wait\r\n\
+         if not errorlevel 1 (\r\n\
+           set /a wait_tries+=1\r\n\
+           if %wait_tries% LSS 15 goto wait\r\n\
+         )\r\n\
+         set /a tries=0\r\n\
          :copytry\r\n\
          copy /y \"{src}\" \"{dst}\" >nul 2>&1\r\n\
          if errorlevel 1 (\r\n\
            set /a tries+=1\r\n\
-           if %tries% LSS 6 (\r\n\
-             timeout /t 1 /nobreak >nul\r\n\
+           if %tries% LSS 8 (\r\n\
+             ping 127.0.0.1 -n 2 >nul\r\n\
              goto copytry\r\n\
            )\r\n\
          )\r\n\

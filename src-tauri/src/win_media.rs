@@ -18,11 +18,13 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END,
-    VK_ESCAPE, VK_F1, VK_F10, VK_F11, VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8,
-    VK_F9, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE,
-    VK_MEDIA_PREV_TRACK, VK_MEDIA_STOP, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT,
-    VK_SPACE, VK_TAB, VK_UP,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL,
+    VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F10, VK_F11, VK_F12, VK_F2, VK_F3, VK_F4,
+    VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN,
+    VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK, VK_MEDIA_STOP, VK_MENU,
+    VK_NEXT, VK_OEM_1, VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7, VK_OEM_COMMA,
+    VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
+    VK_TAB, VK_UP,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -49,19 +51,19 @@ pub struct NowPlayingInfo {
     pub playing: bool,
 }
 
-struct ComGuard;
+struct ComGuard(bool);
 impl ComGuard {
     fn new() -> Self {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        }
-        Self
+        let should_uninit = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
+        Self(should_uninit)
     }
 }
 impl Drop for ComGuard {
     fn drop(&mut self) {
-        unsafe {
-            CoUninitialize();
+        if self.0 {
+            unsafe {
+                CoUninitialize();
+            }
         }
     }
 }
@@ -389,43 +391,56 @@ pub fn send_media_command(command: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_vk(key: &str) -> Option<VIRTUAL_KEY> {
+fn parse_vk(key: &str) -> Option<(VIRTUAL_KEY, bool)> {
     let k = key.trim().to_ascii_uppercase();
     match k.as_str() {
-        "CTRL" | "CONTROL" => Some(VK_CONTROL),
-        "SHIFT" => Some(VK_SHIFT),
-        "ALT" => Some(VK_MENU),
-        "WIN" | "META" | "SUPER" => Some(VK_LWIN),
-        "ENTER" | "RETURN" => Some(VK_RETURN),
-        "ESC" | "ESCAPE" => Some(VK_ESCAPE),
-        "SPACE" => Some(VK_SPACE),
-        "TAB" => Some(VK_TAB),
-        "INS" | "INSERT" => Some(VK_INSERT),
-        "DEL" | "DELETE" => Some(VK_DELETE),
-        "HOME" => Some(VK_HOME),
-        "END" => Some(VK_END),
-        "PGUP" | "PAGEUP" => Some(VK_PRIOR),
-        "PGDN" | "PAGEDOWN" => Some(VK_NEXT),
-        "UP" => Some(VK_UP),
-        "DOWN" => Some(VK_DOWN),
-        "LEFT" => Some(VK_LEFT),
-        "RIGHT" => Some(VK_RIGHT),
-        "F1" => Some(VK_F1),
-        "F2" => Some(VK_F2),
-        "F3" => Some(VK_F3),
-        "F4" => Some(VK_F4),
-        "F5" => Some(VK_F5),
-        "F6" => Some(VK_F6),
-        "F7" => Some(VK_F7),
-        "F8" => Some(VK_F8),
-        "F9" => Some(VK_F9),
-        "F10" => Some(VK_F10),
-        "F11" => Some(VK_F11),
-        "F12" => Some(VK_F12),
+        "CTRL" | "CONTROL" => Some((VK_CONTROL, false)),
+        "SHIFT" => Some((VK_SHIFT, false)),
+        "ALT" => Some((VK_MENU, false)),
+        "WIN" | "META" | "SUPER" => Some((VK_LWIN, true)),
+        "ENTER" | "RETURN" => Some((VK_RETURN, false)),
+        "ESC" | "ESCAPE" => Some((VK_ESCAPE, false)),
+        "SPACE" => Some((VK_SPACE, false)),
+        "TAB" => Some((VK_TAB, false)),
+        "BACK" | "BACKSPACE" => Some((VK_BACK, false)),
+        "CAPS" | "CAPSLOCK" => Some((VK_CAPITAL, false)),
+        "INS" | "INSERT" => Some((VK_INSERT, true)),
+        "DEL" | "DELETE" => Some((VK_DELETE, true)),
+        "HOME" => Some((VK_HOME, true)),
+        "END" => Some((VK_END, true)),
+        "PGUP" | "PAGEUP" => Some((VK_PRIOR, true)),
+        "PGDN" | "PAGEDOWN" => Some((VK_NEXT, true)),
+        "UP" => Some((VK_UP, true)),
+        "DOWN" => Some((VK_DOWN, true)),
+        "LEFT" => Some((VK_LEFT, true)),
+        "RIGHT" => Some((VK_RIGHT, true)),
+        "-" | "MINUS" => Some((VK_OEM_MINUS, false)),
+        "=" | "EQUAL" | "PLUS" => Some((VK_OEM_PLUS, false)),
+        "[" => Some((VK_OEM_4, false)),
+        "]" => Some((VK_OEM_6, false)),
+        "\\" => Some((VK_OEM_5, false)),
+        ";" => Some((VK_OEM_1, false)),
+        "'" => Some((VK_OEM_7, false)),
+        "," => Some((VK_OEM_COMMA, false)),
+        "." => Some((VK_OEM_PERIOD, false)),
+        "/" => Some((VK_OEM_2, false)),
+        "`" => Some((VK_OEM_3, false)),
+        "F1" => Some((VK_F1, false)),
+        "F2" => Some((VK_F2, false)),
+        "F3" => Some((VK_F3, false)),
+        "F4" => Some((VK_F4, false)),
+        "F5" => Some((VK_F5, false)),
+        "F6" => Some((VK_F6, false)),
+        "F7" => Some((VK_F7, false)),
+        "F8" => Some((VK_F8, false)),
+        "F9" => Some((VK_F9, false)),
+        "F10" => Some((VK_F10, false)),
+        "F11" => Some((VK_F11, false)),
+        "F12" => Some((VK_F12, false)),
         _ if k.len() == 1 => {
             let ch = k.as_bytes()[0];
             if ch.is_ascii_alphanumeric() {
-                Some(VIRTUAL_KEY(ch as u16))
+                Some((VIRTUAL_KEY(ch as u16), false))
             } else {
                 None
             }
@@ -435,34 +450,51 @@ fn parse_vk(key: &str) -> Option<VIRTUAL_KEY> {
 }
 
 pub fn send_hotkey(keys: &[String]) -> Result<(), String> {
-    let vks: Vec<VIRTUAL_KEY> = keys.iter().filter_map(|k| parse_vk(k)).collect();
+    let mut vks = Vec::with_capacity(keys.len());
+    for raw in keys {
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let parsed = parse_vk(raw).ok_or_else(|| format!("지원하지 않는 키: {}", raw.trim()))?;
+        vks.push(parsed);
+    }
     if vks.is_empty() {
         return Err("유효한 단축키가 없습니다.".into());
     }
 
     let mut inputs = Vec::with_capacity(vks.len() * 2);
-    for &vk in &vks {
+    for &(vk, extended) in &vks {
+        let flags = if extended {
+            KEYEVENTF_EXTENDEDKEY
+        } else {
+            KEYBD_EVENT_FLAGS(0)
+        };
         inputs.push(INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
                     wVk: vk,
                     wScan: 0,
-                    dwFlags: KEYBD_EVENT_FLAGS(0),
+                    dwFlags: flags,
                     time: 0,
                     dwExtraInfo: 0,
                 },
             },
         });
     }
-    for &vk in vks.iter().rev() {
+    for &(vk, extended) in vks.iter().rev() {
+        let flags = if extended {
+            KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP
+        } else {
+            KEYEVENTF_KEYUP
+        };
         inputs.push(INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
                     wVk: vk,
                     wScan: 0,
-                    dwFlags: KEYEVENTF_KEYUP,
+                    dwFlags: flags,
                     time: 0,
                     dwExtraInfo: 0,
                 },

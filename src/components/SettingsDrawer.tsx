@@ -79,9 +79,26 @@ export const SettingsDrawer: React.FC<Props> = ({
 
   const handleDeletePage = (idx: number) => {
     if (config.pages.length <= 1) return;
-    const nextPages = config.pages.filter((_, i) => i !== idx);
-    onChange({ ...config, pages: nextPages });
-    if (currentPageIndex >= nextPages.length) {
+    const remapPageAction = (item: DeckConfig["pages"][number]["slots"][string]) => {
+      if (item.action.type !== "page") return item;
+      const pi = item.action.pageIndex;
+      const nextPi = pi === idx ? Math.min(idx, config.pages.length - 2) : pi > idx ? pi - 1 : pi;
+      return nextPi === pi ? item : { ...item, action: { type: "page" as const, pageIndex: nextPi } };
+    };
+    const nextPages = config.pages
+      .filter((_, i) => i !== idx)
+      .map((p) => {
+        const nextSlots: typeof p.slots = {};
+        for (const [k, v] of Object.entries(p.slots)) {
+          nextSlots[k] = remapPageAction(v);
+        }
+        return { ...p, slots: nextSlots };
+      });
+    const nextVault = config.vault?.map(remapPageAction);
+    onChange({ ...config, pages: nextPages, ...(nextVault ? { vault: nextVault } : {}) });
+    if (idx < currentPageIndex) {
+      onSwitchPage(Math.max(0, currentPageIndex - 1));
+    } else if (currentPageIndex >= nextPages.length) {
       onSwitchPage(nextPages.length - 1);
     }
   };

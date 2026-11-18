@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use windows::core::{w, BSTR, PCSTR, VARIANT};
@@ -21,7 +22,6 @@ use windows::Win32::System::SystemInformation::{
 use windows::Win32::System::Threading::GetSystemTimes;
 use windows::Win32::System::Wmi::{
     IWbemLocator, WbemLocator, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY,
-    WBEM_INFINITE,
 };
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -285,7 +285,8 @@ fn read_pdh_stats(out: &mut SystemStats, need_gpu_fallback: bool) {
                             None,
                         );
                         if buf_size > 0 && item_count > 0 {
-                            let mut raw = vec![0u8; buf_size as usize];
+                            let words = (buf_size as usize + 7) / 8;
+                            let mut raw = vec![0u64; words];
                             let ptr = raw.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W;
                             if PdhGetFormattedCounterArrayW(
                                 st.gpu_3d_counter,
@@ -316,10 +317,11 @@ struct TempCache {
 }
 
 static TEMP_CACHE: Mutex<Option<TempCache>> = Mutex::new(None);
+static TEMP_REFRESHING: AtomicBool = AtomicBool::new(false);
 
 fn query_wmi_cpu_temp() -> Option<i32> {
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let should_uninit = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
         let res = (|| -> Option<i32> {
             let locator: IWbemLocator =
                 CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER).ok()?;
@@ -349,7 +351,7 @@ fn query_wmi_cpu_temp() -> Option<i32> {
                         loop {
                             let mut objs = [None];
                             let mut ret = 0u32;
-                            if enm.Next(WBEM_INFINITE, &mut objs, &mut ret).is_err() || ret == 0 {
+                            if enm.Next(2000, &mut objs, &mut ret).is_err() || ret == 0 {
                                 break;
                             }
                             if let Some(obj) = &objs[0] {
@@ -412,7 +414,7 @@ fn query_wmi_cpu_temp() -> Option<i32> {
                 ) {
                     let mut objs = [None];
                     let mut ret = 0u32;
-                    if enm.Next(WBEM_INFINITE, &mut objs, &mut ret).is_ok() && ret > 0 {
+                    if enm.Next(2000, &mut objs, &mut ret).is_ok() && ret > 0 {
                         if let Some(obj) = &objs[0] {
                             let mut v_val = VARIANT::default();
                             if obj
@@ -432,34 +434,52 @@ fn query_wmi_cpu_temp() -> Option<i32> {
             }
             None
         })();
-        CoUninitialize();
+        if should_uninit {
+            CoUninitialize();
+        }
         res
     }
 }
 
 fn read_cached_cpu_temp() -> Option<i32> {
-    let Ok(mut guard) = TEMP_CACHE.lock() else {
-        return None;
+    let (should_refresh, cached_temp) = {
+        let Ok(guard) = TEMP_CACHE.lock() else {
+            return None;
+        };
+        let refresh = match guard.as_ref() {
+            Some(c) => {
+                let ttl = if c.temp.is_some() {
+                    Duration::from_secs(4)
+                } else {
+                    Duration::from_secs(20)
+                };
+                c.last_checked.elapsed() >= ttl
+            }
+            None => true,
+        };
+        (refresh, guard.as_ref().and_then(|c| c.temp))
     };
-    let should_refresh = match guard.as_ref() {
-        Some(c) => {
-            let ttl = if c.temp.is_some() {
-                Duration::from_secs(4)
-            } else {
-                Duration::from_secs(20)
-            };
-            c.last_checked.elapsed() >= ttl
-        }
-        None => true,
-    };
-    if should_refresh {
-        let t = query_wmi_cpu_temp();
+
+    if !should_refresh {
+        return cached_temp;
+    }
+
+    if TEMP_REFRESHING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return cached_temp;
+    }
+
+    let t = query_wmi_cpu_temp();
+    if let Ok(mut guard) = TEMP_CACHE.lock() {
         *guard = Some(TempCache {
             last_checked: Instant::now(),
             temp: t,
         });
     }
-    guard.as_ref().and_then(|c| c.temp)
+    TEMP_REFRESHING.store(false, Ordering::SeqCst);
+    t
 }
 
 static PREV_CPU: Mutex<Option<(u64, u64, u64)>> = Mutex::new(None);

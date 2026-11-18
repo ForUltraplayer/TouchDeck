@@ -83,7 +83,7 @@ pub fn get_running_status(targets: &[String]) -> RunningStatus {
                     }
                     let stem = name_buf.strip_suffix(".exe").unwrap_or(&name_buf);
 
-                    if entry.th32ProcessID == fg_pid && fg_proc.is_empty() {
+                    if fg_pid != 0 && entry.th32ProcessID == fg_pid && fg_proc.is_empty() {
                         fg_proc.push_str(stem);
                     }
                     if target_map.contains_key(stem) && !matched_stems.contains(stem) {
@@ -520,7 +520,7 @@ fn find_explorer_for_folder(folder: &str) -> (Option<HWND>, HashSet<isize>) {
     let mut matched = None;
 
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let should_uninit = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
         if let Ok(shell_wins) =
             CoCreateInstance::<_, IShellWindows>(&ShellWindows, None, CLSCTX_LOCAL_SERVER)
         {
@@ -548,7 +548,9 @@ fn find_explorer_for_folder(folder: &str) -> (Option<HWND>, HashSet<isize>) {
                 }
             }
         }
-        CoUninitialize();
+        if should_uninit {
+            CoUninitialize();
+        }
     }
 
     (matched, all_hwnds)

@@ -6,7 +6,8 @@ use std::time::Duration;
 use windows::core::{w, Interface, HSTRING};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY, MONITOR_DEFAULTTONULL,
+    GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
+    MONITOR_DEFAULTTONULL,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
@@ -62,7 +63,7 @@ pub fn set_autostart(enabled: bool) -> Result<bool, String> {
         .unwrap_or_default();
 
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let should_uninit = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
         let res = (|| -> Result<(), String> {
             let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
                 .map_err(|e| e.to_string())?;
@@ -76,7 +77,9 @@ pub fn set_autostart(enabled: bool) -> Result<bool, String> {
                 .map_err(|e| e.to_string())?;
             Ok(())
         })();
-        CoUninitialize();
+        if should_uninit {
+            CoUninitialize();
+        }
         res?;
     }
     Ok(true)
@@ -129,6 +132,16 @@ unsafe fn get_monitor_work_area(x: i32, y: i32, w: i32, h: i32) -> (RECT, bool) 
     };
     let mon = MonitorFromPoint(center, MONITOR_DEFAULTTONULL);
     if !mon.is_invalid() && GetMonitorInfoW(mon, &mut info).as_bool() {
+        return (info.rcWork, false);
+    }
+    let win_rc = RECT {
+        left: x,
+        top: y,
+        right: x + w.max(1),
+        bottom: y + h.max(1),
+    };
+    let mon_rect = MonitorFromRect(&win_rc, MONITOR_DEFAULTTONULL);
+    if !mon_rect.is_invalid() && GetMonitorInfoW(mon_rect, &mut info).as_bool() {
         return (info.rcWork, false);
     }
     let primary = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
@@ -332,6 +345,15 @@ unsafe fn is_desktop_host_class(hwnd: HWND) -> bool {
     slice == WORKER_W || slice == PROGMAN
 }
 
+static LAST_RAISE_FAIL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 pub fn tick_desktop_visibility(hwnd_raw: isize, always_on_top: bool) {
     if !DESKTOP_LAYER_ENABLED.load(Ordering::SeqCst) || USER_HIDDEN.load(Ordering::SeqCst) {
         return;
@@ -350,7 +372,13 @@ pub fn tick_desktop_visibility(hwnd_raw: isize, always_on_top: bool) {
 
         let fg = GetForegroundWindow();
         if !fg.0.is_null() && fg != hwnd && is_desktop_host_class(fg) && is_window_behind(hwnd, fg) {
-            need_raise = true;
+            let now = now_ms();
+            let last = LAST_RAISE_FAIL_MS.load(Ordering::Relaxed);
+            if now.saturating_sub(last) >= 1000 {
+                need_raise = true;
+            }
+        } else {
+            LAST_RAISE_FAIL_MS.store(0, Ordering::Relaxed);
         }
 
         if need_raise {
@@ -373,6 +401,11 @@ pub fn tick_desktop_visibility(hwnd_raw: isize, always_on_top: bool) {
                     0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 );
+            }
+            if !fg.0.is_null() && fg != hwnd && is_desktop_host_class(fg) && is_window_behind(hwnd, fg) {
+                LAST_RAISE_FAIL_MS.store(now_ms(), Ordering::Relaxed);
+            } else {
+                LAST_RAISE_FAIL_MS.store(0, Ordering::Relaxed);
             }
         }
     }

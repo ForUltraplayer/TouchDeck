@@ -9,7 +9,7 @@ mod win_window;
 
 use config::{
     copy_image_to_assets, get_data_dir, is_portable_mode, load_config, resolve_asset_path,
-    save_config, ButtonAction, ButtonItem, DeckConfig,
+    save_config, save_config_from_ui, ButtonAction, ButtonItem, DeckConfig,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -47,7 +47,7 @@ fn get_config() -> Result<DeckConfig, String> {
 
 #[tauri::command]
 fn save_config_cmd(config: DeckConfig) -> Result<(), String> {
-    save_config(&config)
+    save_config_from_ui(&config)
 }
 
 #[tauri::command]
@@ -60,19 +60,25 @@ fn get_env_info() -> Result<EnvInfo, String> {
 }
 
 #[tauri::command]
-fn inspect_drop(path: String) -> Result<ResolvedDrop, String> {
-    let mut res = win_shell::inspect_dropped_path(&path)?;
-    if res.kind == "url" && !res.url.is_empty() {
-        if let Ok(fav) = win_shell::fetch_favicon_asset(&res.url) {
-            res.icon_path = Some(fav);
+async fn inspect_drop(path: String) -> Result<ResolvedDrop, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut res = win_shell::inspect_dropped_path(&path)?;
+        if res.kind == "url" && !res.url.is_empty() {
+            if let Ok(fav) = win_shell::fetch_favicon_asset(&res.url) {
+                res.icon_path = Some(fav);
+            }
         }
-    }
-    Ok(res)
+        Ok(res)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn fetch_favicon(url: String) -> Result<String, String> {
-    win_shell::fetch_favicon_asset(&url)
+async fn fetch_favicon(url: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || win_shell::fetch_favicon_asset(&url))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -175,11 +181,14 @@ fn execute_single_action(
 }
 
 #[tauri::command]
-fn execute_action(
+async fn execute_action(
     action: ButtonAction,
     discord: State<'_, DiscordBridge>,
 ) -> Result<ExecuteResult, String> {
-    execute_single_action(&action, Some(discord.inner()))
+    let bridge = discord.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || execute_single_action(&action, Some(&bridge)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -221,18 +230,25 @@ async fn apply_update(app: AppHandle, download_url: String) -> Result<(), String
 }
 
 #[tauri::command]
-fn get_volume_state() -> Result<VolumeState, String> {
-    win_media::get_volume_state()
+async fn get_volume_state() -> Result<VolumeState, String> {
+    tauri::async_runtime::spawn_blocking(win_media::get_volume_state)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn list_audio_devices() -> Result<Vec<AudioDeviceInfo>, String> {
-    win_media::list_audio_devices()
+async fn list_audio_devices() -> Result<Vec<AudioDeviceInfo>, String> {
+    tauri::async_runtime::spawn_blocking(win_media::list_audio_devices)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn get_now_playing() -> Option<NowPlayingInfo> {
-    win_media::get_now_playing()
+async fn get_now_playing() -> Option<NowPlayingInfo> {
+    tauri::async_runtime::spawn_blocking(win_media::get_now_playing)
+        .await
+        .ok()
+        .flatten()
 }
 
 #[tauri::command]
@@ -244,8 +260,13 @@ async fn get_system_stats(include_temp: Option<bool>) -> Result<SystemStats, Str
 }
 
 #[tauri::command]
-fn get_running_status(proc_names: Vec<String>) -> RunningStatus {
-    win_focus::get_running_status(&proc_names)
+async fn get_running_status(proc_names: Vec<String>) -> RunningStatus {
+    tauri::async_runtime::spawn_blocking(move || win_focus::get_running_status(&proc_names))
+        .await
+        .unwrap_or(RunningStatus {
+            running: Vec::new(),
+            foreground_proc: String::new(),
+        })
 }
 
 #[tauri::command]
@@ -348,18 +369,27 @@ fn enable_portable_mode() -> Result<String, String> {
     }
     let current = get_data_dir()?;
     std::fs::create_dir_all(target.join("assets")).map_err(|e| e.to_string())?;
-    if current.join("config.json").exists() {
-        let _ = std::fs::copy(current.join("config.json"), target.join("config.json"));
-    }
-    if let Ok(entries) = std::fs::read_dir(current.join("assets")) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_file() {
-                if let Some(name) = p.file_name() {
-                    let _ = std::fs::copy(&p, target.join("assets").join(name));
+    let copy_res = (|| -> Result<(), String> {
+        if current.join("config.json").exists() {
+            std::fs::copy(current.join("config.json"), target.join("config.json"))
+                .map_err(|e| format!("config.json 복사 실패: {e}"))?;
+        }
+        if let Ok(entries) = std::fs::read_dir(current.join("assets")) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    if let Some(name) = p.file_name() {
+                        std::fs::copy(&p, target.join("assets").join(name))
+                            .map_err(|e| format!("에셋 복사 실패: {e}"))?;
+                    }
                 }
             }
         }
+        Ok(())
+    })();
+    if let Err(e) = copy_res {
+        let _ = std::fs::remove_dir_all(&target);
+        return Err(e);
     }
     Ok(target.to_string_lossy().to_string())
 }
@@ -387,8 +417,14 @@ struct LegacyLauncherEntry {
 }
 
 #[tauri::command]
-fn import_launchers_json(path: String) -> Result<usize, String> {
-    let legacy_path = Path::new(&path);
+async fn import_launchers_json(path: String) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || import_launchers_json_sync(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn import_launchers_json_sync(path: &str) -> Result<usize, String> {
+    let legacy_path = Path::new(path);
     if !legacy_path.exists() {
         return Err(format!("파일을 찾을 수 없습니다: {path}"));
     }

@@ -24,6 +24,7 @@ import { SettingsDrawer } from "./components/SettingsDrawer";
 import type {
   ButtonItem,
   DeckConfig,
+  DiscordConfig,
   DiscordState,
   NowPlayingInfo,
   RunningStatus,
@@ -89,18 +90,22 @@ export const App: React.FC = () => {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [clockText, setClockText] = useState(formatClock);
   const [toast, setToast] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const swipeRef = useRef<{ startX: number; startY: number; swiping: boolean } | null>(null);
   const suppressClickUntilRef = useRef(0);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const moveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const animTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dragNoActivateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const animSeqRef = useRef(0);
   const prevLayoutRef = useRef<{
     dockOpen: boolean;
     modalOpen: boolean;
     gridW: number;
     gridH: number;
+    winW: number;
+    winH: number;
   } | null>(null);
   const activeModalRef = useRef<{ kind: "settings" } | { kind: "editor"; slot: number } | null>(null);
   const userHiddenRef = useRef(false);
@@ -108,6 +113,11 @@ export const App: React.FC = () => {
   const lastWinPosRef = useRef<{ x: number; y: number } | null>(null);
   const programmaticMoveUntilRef = useRef(0);
   const activeDockPhysWRef = useRef(0);
+  const statsInFlightRef = useRef(false);
+  const wantNoActivateRef = useRef(true);
+  const modalOpenRef = useRef(false);
+  const shellRectRef = useRef(shellRect);
+  shellRectRef.current = shellRect;
   const slotDragPendingRef = useRef<{
     fromSlot: number;
     label: string;
@@ -135,6 +145,7 @@ export const App: React.FC = () => {
 
   const reloadConfig = useCallback(async () => {
     const loaded = await api.getConfig();
+    setLoadError(null);
     homePosRef.current =
       loaded.window.x !== null && loaded.window.y !== null
         ? { x: loaded.window.x, y: loaded.window.y }
@@ -144,7 +155,11 @@ export const App: React.FC = () => {
 
   // Initial config and Discord state load
   useEffect(() => {
-    reloadConfig().catch((e) => showToast(`설정 로드 오류: ${String(e)}`));
+    reloadConfig().catch((e) => {
+      const msg = `설정 로드 오류: ${String(e)}`;
+      setLoadError(msg);
+      showToast(msg);
+    });
     api.getDiscordState().then(setDiscordState).catch(() => {});
   }, [reloadConfig, showToast]);
 
@@ -180,11 +195,15 @@ export const App: React.FC = () => {
     const u4 = listen<DiscordState>("discord-state", (e) => {
       setDiscordState(e.payload);
     });
+    const u5 = listen<DiscordConfig>("discord-config-updated", (e) => {
+      setConfig((prev) => (prev ? { ...prev, discord: e.payload } : prev));
+    });
     return () => {
       u1.then((fn) => fn());
       u2.then((fn) => fn());
       u3.then((fn) => fn());
       u4.then((fn) => fn());
+      u5.then((fn) => fn());
     };
   }, []);
 
@@ -273,7 +292,8 @@ export const App: React.FC = () => {
           )
           .catch(() => {});
       }
-      if (needStats) {
+      if (needStats && !statsInFlightRef.current) {
+        statsInFlightRef.current = true;
         api
           .getSystemStats(needTemp)
           .then((next) =>
@@ -291,7 +311,10 @@ export const App: React.FC = () => {
                 : next
             )
           )
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => {
+            statsInFlightRef.current = false;
+          });
       }
       const nextClk = formatClock();
       setClockText((prev) =>
@@ -312,16 +335,22 @@ export const App: React.FC = () => {
 
   // Toggle WS_EX_NOACTIVATE so touching buttons doesn't steal focus from active apps
   const modalOpen = settingsOpen || editingSlot !== null;
+  modalOpenRef.current = modalOpen;
   if (settingsOpen) {
     activeModalRef.current = { kind: "settings" };
   } else if (editingSlot !== null) {
     activeModalRef.current = { kind: "editor", slot: editingSlot };
   }
+  const wantNoActivate = !modalOpen && !editMode && !dockOpen;
+  wantNoActivateRef.current = wantNoActivate;
   useEffect(() => {
     if (!config) return;
-    const wantNoActivate = !modalOpen && !editMode && !dockOpen;
+    if (!wantNoActivate && dragNoActivateTimerRef.current) {
+      clearTimeout(dragNoActivateTimerRef.current);
+      dragNoActivateTimerRef.current = null;
+    }
     api.setNoActivate(wantNoActivate).catch(() => {});
-  }, [config !== null, modalOpen, editMode, dockOpen]);
+  }, [config !== null, wantNoActivate]);
 
   // Resolve relative asset paths -> absolute paths for convertFileSrc
   useEffect(() => {
@@ -380,6 +409,9 @@ export const App: React.FC = () => {
     const gridW = gridCols * gridCellSize + Math.max(0, gridCols - 1) * gridGap + PAD_X * 2;
     const gridH =
       gridRows * gridCellSize + Math.max(0, gridRows - 1) * gridGap + HEADER_H + FOOTER_H + PAD_Y * 2;
+    const extraDockW = dockOpen ? DOCK_W : 0;
+    const curWinW = modalOpen ? Math.max(gridW + extraDockW, 600) : gridW + extraDockW;
+    const curWinH = modalOpen ? Math.max(gridH, 680) : gridH;
     const prev = prevLayoutRef.current;
 
     // Never resize while settings/editor modal stays open so sliders do not jitter under the cursor.
@@ -387,7 +419,7 @@ export const App: React.FC = () => {
       return;
     }
 
-    prevLayoutRef.current = { dockOpen, modalOpen, gridW, gridH };
+    prevLayoutRef.current = { dockOpen, modalOpen, gridW, gridH, winW: curWinW, winH: curWinH };
 
     if (animTimerRef.current) {
       clearTimeout(animTimerRef.current);
@@ -401,7 +433,6 @@ export const App: React.FC = () => {
     const seq = ++animSeqRef.current;
     const anchorX = homePosRef.current?.x ?? null;
     const anchorY = homePosRef.current?.y ?? null;
-    const extraDockW = dockOpen ? DOCK_W : 0;
 
     const markProgrammaticMove = () => {
       programmaticMoveUntilRef.current = Date.now() + 700;
@@ -443,11 +474,14 @@ export const App: React.FC = () => {
         );
         if (animSeqRef.current !== seq) return;
 
+        const midShell = shellRectRef.current;
         const curPos = lastWinPosRef.current ?? { x: plan.baseX, y: plan.baseY };
-        const startW = prev.dockOpen ? prev.gridW + DOCK_W : prev.gridW;
-        const startH = prev.gridH;
-        const startTx = (curPos.x - plan.x) / plan.scale;
-        const startTy = (curPos.y - plan.y) / plan.scale;
+        const startW = midShell ? midShell.width : prev.dockOpen ? prev.gridW + DOCK_W : prev.gridW;
+        const startH = midShell ? midShell.height : prev.gridH;
+        const startTx =
+          (curPos.x - plan.x) / plan.scale + (midShell ? midShell.tx : 0);
+        const startTy =
+          (curPos.y - plan.y) / plan.scale + (midShell ? midShell.ty : 0);
 
         flushSync(() => {
           setClosingModal(null);
@@ -501,6 +535,68 @@ export const App: React.FC = () => {
           false
         );
         if (animSeqRef.current !== seq) return;
+
+        const growsPastModal = targetW > prev.winW || targetH > prev.winH;
+        if (growsPastModal) {
+          // If grid was enlarged past modal window bounds, expand OS window first so the grid never clips
+          const curPos = lastWinPosRef.current ?? { x: plan.x, y: plan.y };
+          const startTx = (curPos.x - plan.x) / plan.scale;
+          const startTy = (curPos.y - plan.y) / plan.scale;
+
+          flushSync(() => {
+            if (snapshot) setClosingModal(snapshot);
+            setDockOnLeft(plan.dockOnLeft);
+            if (dockOpen) {
+              setDockMounted(true);
+              setDockExpanded(true);
+            } else {
+              setDockExpanded(false);
+            }
+            setModalVisible(true);
+            setShellRect({
+              width: prev.winW,
+              height: prev.winH,
+              tx: startTx,
+              ty: startTy,
+              animate: false,
+            });
+          });
+
+          markProgrammaticMove();
+          const grown = await api.syncWindowBounds(
+            anchorX,
+            anchorY,
+            gridW,
+            gridH,
+            extraDockW,
+            targetW,
+            targetH,
+            true
+          );
+          if (animSeqRef.current !== seq) return;
+          lastWinPosRef.current = { x: grown.x, y: grown.y };
+          activeDockPhysWRef.current = grown.dockPhysW;
+
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              if (animSeqRef.current !== seq) return;
+              setModalVisible(false);
+              setShellRect({ width: targetW, height: targetH, tx: 0, ty: 0, animate: true });
+            });
+          });
+
+          animTimerRef.current = setTimeout(() => {
+            if (animSeqRef.current !== seq) return;
+            activeModalRef.current = null;
+            setClosingModal(null);
+            if (!dockOpen) setDockMounted(false);
+            setShellRect(null);
+            if (!dockOpen) {
+              homePosRef.current = { x: grown.x, y: grown.y };
+            }
+          }, 240);
+          return;
+        }
 
         const curPos = lastWinPosRef.current ?? { x: plan.x, y: plan.y };
         const closeTx = (plan.x - curPos.x) / plan.scale;
@@ -651,18 +747,30 @@ export const App: React.FC = () => {
     getCurrentWindow().setAlwaysOnTop(config.window.alwaysOnTop).catch(() => {});
   }, [config?.window.alwaysOnTop]);
 
-  // Save window position only on genuine manual drags (never during locked/programmatic shifts)
+  // Save window position only on genuine manual drags (never during locked/modal/programmatic shifts)
   useEffect(() => {
     const win = getCurrentWindow();
     const unlistenPromise = win.onMoved(({ payload }) => {
       const cur = configRef.current;
-      if (!cur || cur.window.locked || Date.now() < programmaticMoveUntilRef.current) {
+      if (
+        !cur ||
+        cur.window.locked ||
+        modalOpenRef.current ||
+        activeModalRef.current !== null ||
+        Date.now() < programmaticMoveUntilRef.current
+      ) {
         return;
       }
       if (moveTimerRef.current) clearTimeout(moveTimerRef.current);
       moveTimerRef.current = setTimeout(() => {
         const latest = configRef.current;
-        if (!latest || latest.window.locked || Date.now() < programmaticMoveUntilRef.current) {
+        if (
+          !latest ||
+          latest.window.locked ||
+          modalOpenRef.current ||
+          activeModalRef.current !== null ||
+          Date.now() < programmaticMoveUntilRef.current
+        ) {
           return;
         }
         lastWinPosRef.current = { x: payload.x, y: payload.y };
@@ -680,6 +788,7 @@ export const App: React.FC = () => {
     return () => {
       if (moveTimerRef.current) clearTimeout(moveTimerRef.current);
       if (animTimerRef.current) clearTimeout(animTimerRef.current);
+      if (dragNoActivateTimerRef.current) clearTimeout(dragNoActivateTimerRef.current);
       unlistenPromise.then((fn) => fn());
     };
   }, []);
@@ -740,61 +849,35 @@ export const App: React.FC = () => {
       }
       if (payload.type === "drop") {
         setDropHoverSlot(null);
-        const cur = configRef.current;
-        if (!cur) return;
-        if (cur.window.locked) {
+        const initCfg = configRef.current;
+        if (!initCfg) return;
+        if (initCfg.window.locked) {
           showToast("잠금 상태입니다. 잠금을 해제한 뒤 드롭하세요.");
           return;
         }
 
-        const totalSlots = cur.grid.columns * cur.grid.rows;
+        const dropPageIdx = pageIndexRef.current;
         let targetSlot = findSlotAtPhysicalPos(payload.position.x, payload.position.y);
-        const curPage = cur.pages[pageIndex];
-        if (!curPage) return;
+        const addedEntries: Array<{ slot: number | null; item: ButtonItem }> = [];
+        const iconUpdates: Array<{ slot: number; iconPath: string }> = [];
+        let bgRel: string | null = null;
 
-        const nextSlots = { ...curPage.slots };
         for (const droppedPath of payload.paths) {
           try {
             const resolved = await api.inspectDrop(droppedPath);
+            const curAfter = configRef.current;
+            const curPageAfter = curAfter?.pages[dropPageIdx];
             if (resolved.kind === "image") {
-              if (targetSlot !== null && nextSlots[String(targetSlot)]) {
+              if (targetSlot !== null && curPageAfter?.slots[String(targetSlot)]) {
                 const rel = await api.importImage(droppedPath, "icon");
-                nextSlots[String(targetSlot)] = {
-                  ...nextSlots[String(targetSlot)],
-                  iconPath: rel,
-                };
-                showToast(`아이콘 이미지 변경: ${nextSlots[String(targetSlot)].label}`);
+                iconUpdates.push({ slot: targetSlot, iconPath: rel });
+                showToast(`아이콘 이미지 변경: ${curPageAfter.slots[String(targetSlot)].label}`);
               } else {
-                const rel = await api.importImage(droppedPath, "bg");
-                const curStyle = cur.theme.buttonStyle ?? "solid";
-                persistConfig({
-                  ...cur,
-                  theme: {
-                    ...cur.theme,
-                    backgroundType: "image",
-                    backgroundImage: rel,
-                    buttonStyle: curStyle === "solid" ? "glass" : curStyle,
-                    backgroundBlur: cur.theme.backgroundBlur === 8 ? 2 : cur.theme.backgroundBlur,
-                    backgroundDim: cur.theme.backgroundDim === 35 ? 20 : cur.theme.backgroundDim,
-                  },
-                });
+                bgRel = await api.importImage(droppedPath, "bg");
                 showToast("배경 이미지 테마가 적용되었습니다.");
-                return;
+                break;
               }
               continue;
-            }
-
-            if (targetSlot === null) {
-              for (let i = 0; i < totalSlots; i++) {
-                if (!nextSlots[String(i)]) {
-                  targetSlot = i;
-                  break;
-                }
-              }
-            }
-            if (targetSlot === null) {
-              showToast("현재 페이지에 빈 칸이 없습니다.");
-              break;
             }
 
             const newBtn: ButtonItem = {
@@ -822,7 +905,7 @@ export const App: React.FC = () => {
                       toggleMinimize: false,
                     },
             };
-            nextSlots[String(targetSlot)] = newBtn;
+            addedEntries.push({ slot: targetSlot, item: newBtn });
             showToast(`등록됨: ${newBtn.label}`);
             targetSlot = null;
           } catch (e) {
@@ -830,8 +913,57 @@ export const App: React.FC = () => {
           }
         }
 
+        const cur = configRef.current;
+        if (!cur) return;
+        if (bgRel) {
+          const curStyle = cur.theme.buttonStyle ?? "solid";
+          persistConfig({
+            ...cur,
+            theme: {
+              ...cur.theme,
+              backgroundType: "image",
+              backgroundImage: bgRel,
+              buttonStyle: curStyle === "solid" ? "glass" : curStyle,
+              backgroundBlur: cur.theme.backgroundBlur === 8 ? 2 : cur.theme.backgroundBlur,
+              backgroundDim: cur.theme.backgroundDim === 35 ? 20 : cur.theme.backgroundDim,
+            },
+          });
+          return;
+        }
+        if (iconUpdates.length === 0 && addedEntries.length === 0) return;
+
+        const curPage = cur.pages[dropPageIdx];
+        if (!curPage) return;
+        const totalSlots = cur.grid.columns * cur.grid.rows;
+        const nextSlots = { ...curPage.slots };
+
+        for (const upd of iconUpdates) {
+          if (nextSlots[String(upd.slot)]) {
+            nextSlots[String(upd.slot)] = {
+              ...nextSlots[String(upd.slot)],
+              iconPath: upd.iconPath,
+            };
+          }
+        }
+        for (const entry of addedEntries) {
+          let slotToUse = entry.slot;
+          if (slotToUse === null) {
+            for (let i = 0; i < totalSlots; i++) {
+              if (!nextSlots[String(i)]) {
+                slotToUse = i;
+                break;
+              }
+            }
+          }
+          if (slotToUse === null) {
+            showToast("현재 페이지에 빈 칸이 없습니다.");
+            break;
+          }
+          nextSlots[String(slotToUse)] = entry.item;
+        }
+
         const nextPages = cur.pages.map((p, idx) =>
-          idx === pageIndex ? { ...p, slots: nextSlots } : p
+          idx === dropPageIdx ? { ...p, slots: nextSlots } : p
         );
         persistConfig({ ...cur, pages: nextPages });
       }
@@ -840,7 +972,7 @@ export const App: React.FC = () => {
     return () => {
       unlistenPromise.then((fn) => fn());
     };
-  }, [findSlotAtPhysicalPos, pageIndex, persistConfig, showToast]);
+  }, [findSlotAtPhysicalPos, persistConfig, showToast]);
 
   const currentPage = config?.pages[pageIndex] ?? config?.pages[0];
 
@@ -1264,13 +1396,22 @@ export const App: React.FC = () => {
       }
     };
 
+    const onCancel = () => {
+      slotDragPendingRef.current = null;
+      dockDragPendingRef.current = null;
+      swipeRef.current = null;
+      setDragSwap(null);
+      setVaultHover(false);
+      setSwipeOffset(0);
+    };
+
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("pointercancel", onCancel);
     return () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("pointercancel", onCancel);
     };
   }, [findSlotAtClientPos, isOverVaultDrop]);
 
@@ -1294,7 +1435,31 @@ export const App: React.FC = () => {
   }, [config]);
 
   if (!config || !currentPage) {
-    return <div className="loading-shell">TouchDeck 불러오는 중...</div>;
+    return (
+      <div className="loading-shell" style={{ flexDirection: "column", gap: 10, padding: 16 }}>
+        <span>{loadError ?? "TouchDeck 불러오는 중..."}</span>
+        {loadError && (
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() =>
+                reloadConfig().catch((e) => setLoadError(`설정 로드 오류: ${String(e)}`))
+              }
+            >
+              다시 시도
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => getCurrentWindow().hide()}
+            >
+              숨기기
+            </button>
+          </div>
+        )}
+      </div>
+    );
   }
 
   const totalSlots = config.grid.columns * config.grid.rows;
@@ -1372,8 +1537,12 @@ export const App: React.FC = () => {
           onPointerDown={() => {
             if (!config.window.locked) {
               api.setNoActivate(false).catch(() => {});
-              setTimeout(() => {
-                if (!modalOpen && !editMode && !dockOpen) {
+              if (dragNoActivateTimerRef.current) {
+                clearTimeout(dragNoActivateTimerRef.current);
+              }
+              dragNoActivateTimerRef.current = setTimeout(() => {
+                dragNoActivateTimerRef.current = null;
+                if (wantNoActivateRef.current) {
                   api.setNoActivate(true).catch(() => {});
                 }
               }, 1500);
@@ -1465,7 +1634,7 @@ export const App: React.FC = () => {
               gridTemplateRows: `repeat(${config.grid.rows}, ${config.grid.cellSize}px)`,
               gap: config.grid.gap,
               padding: `${PAD_Y}px ${PAD_X}px`,
-              touchAction: editMode ? "none" : "pan-y",
+              touchAction: "none",
               transform: swipeOffset !== 0 ? `translateX(${swipeOffset}px)` : undefined,
             }}
             onPointerDown={(e) => {
@@ -1655,6 +1824,7 @@ export const App: React.FC = () => {
         <div className={`modal-layer ${modalVisible ? "modal-layer-visible" : ""}`}>
           {renderedModal.kind === "editor" ? (
             <ButtonEditorModal
+              key={`${pageIndex}-${renderedModal.slot}`}
               slotIndex={renderedModal.slot}
               currentPageIndex={pageIndex}
               initialItem={currentPage.slots[String(renderedModal.slot)]}

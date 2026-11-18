@@ -277,6 +277,24 @@ export const ButtonEditorModal: React.FC<Props> = ({
             .filter(Boolean),
         },
       };
+    } else if (item.action.type === "multi") {
+      finalItem = {
+        ...item,
+        action: {
+          type: "multi",
+          steps: item.action.steps.map((st) =>
+            st.action.type === "hotkey"
+              ? {
+                  ...st,
+                  action: {
+                    type: "hotkey",
+                    keys: st.action.keys.map((k) => k.trim()).filter(Boolean),
+                  },
+                }
+              : st
+          ),
+        },
+      };
     }
     onSave(slotIndex, finalItem);
   };
@@ -693,7 +711,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
                         else if (a.type === "hotkey")
                           cur[sIdx].action = {
                             type: "hotkey",
-                            keys: v.split("+").map((k) => k.trim()).filter(Boolean),
+                            keys: v.split("+").map((k) => k.trim()),
                           };
                         else if (a.type === "media")
                           cur[sIdx].action = { type: "media", command: v as "play_pause" | "next" | "prev" | "stop" };
