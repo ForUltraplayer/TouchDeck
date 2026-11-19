@@ -22,18 +22,21 @@ import {
   X,
 } from "lucide-react";
 import { assetUrl } from "../api";
+import { useI18n, type TKey } from "../i18n";
 import type { ButtonItem } from "../types";
 
+// Templates: category and label are translation keys, resolved when shown or inserted
 export interface PresetDef {
-  category: string;
-  item: Omit<ButtonItem, "id">;
+  category: TKey;
+  labelKey: TKey;
+  item: Omit<ButtonItem, "id" | "label">;
 }
 
 export const PRESET_BUTTONS: PresetDef[] = [
   {
-    category: "오디오 & 볼륨",
+    category: "preset.cat.audio",
+    labelKey: "preset.volUp",
     item: {
-      label: "볼륨 +",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -44,9 +47,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "오디오 & 볼륨",
+    category: "preset.cat.audio",
+    labelKey: "preset.volDown",
     item: {
-      label: "볼륨 -",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -57,9 +60,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "오디오 & 볼륨",
+    category: "preset.cat.audio",
+    labelKey: "preset.mute",
     item: {
-      label: "음소거",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -70,9 +73,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "오디오 & 볼륨",
+    category: "preset.cat.audio",
+    labelKey: "preset.mic",
     item: {
-      label: "마이크",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -83,9 +86,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "오디오 & 볼륨",
+    category: "preset.cat.audio",
+    labelKey: "preset.outputSwitch",
     item: {
-      label: "출력 전환",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -96,9 +99,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "미디어",
+    category: "preset.cat.media",
+    labelKey: "preset.playPause",
     item: {
-      label: "재생/정지",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -109,9 +112,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "미디어",
+    category: "preset.cat.media",
+    labelKey: "media.prev",
     item: {
-      label: "이전 곡",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -122,9 +125,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "미디어",
+    category: "preset.cat.media",
+    labelKey: "media.next",
     item: {
-      label: "다음 곡",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -135,9 +138,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "미디어",
+    category: "preset.cat.media",
+    labelKey: "media.stop",
     item: {
-      label: "정지",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -148,9 +151,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "Discord (양방향)",
+    category: "preset.cat.discord",
+    labelKey: "preset.dcMic",
     item: {
-      label: "DC 마이크",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -161,9 +164,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "Discord (양방향)",
+    category: "preset.cat.discord",
+    labelKey: "preset.dcHeadset",
     item: {
-      label: "DC 헤드셋",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -174,9 +177,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "Discord (양방향)",
+    category: "preset.cat.discord",
+    labelKey: "preset.dcLeave",
     item: {
-      label: "DC 나가기",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -187,9 +190,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "위젯 & 매크로",
+    category: "preset.cat.widget",
+    labelKey: "preset.clock",
     item: {
-      label: "시계",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -200,9 +203,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "위젯 & 매크로",
+    category: "preset.cat.widget",
+    labelKey: "preset.cpuRam",
     item: {
-      label: "CPU / RAM",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -213,9 +216,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "위젯 & 매크로",
+    category: "preset.cat.widget",
+    labelKey: "preset.gpu",
     item: {
-      label: "GPU 모니터",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -230,9 +233,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "위젯 & 매크로",
+    category: "preset.cat.widget",
+    labelKey: "preset.nowPlaying",
     item: {
-      label: "현재 곡",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -243,9 +246,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "위젯 & 매크로",
+    category: "preset.cat.widget",
+    labelKey: "editor.stepHotkey",
     item: {
-      label: "단축키",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -256,9 +259,9 @@ export const PRESET_BUTTONS: PresetDef[] = [
     },
   },
   {
-    category: "위젯 & 매크로",
+    category: "preset.cat.widget",
+    labelKey: "preset.multi",
     item: {
-      label: "멀티 액션",
       showLabel: true,
       fontSize: 13,
       textColor: "#FFFFFF",
@@ -270,7 +273,7 @@ export const PRESET_BUTTONS: PresetDef[] = [
   },
 ];
 
-function renderMiniIcon(item: Omit<ButtonItem, "id">, absIcon?: string | null) {
+function renderMiniIcon(item: Pick<ButtonItem, "action">, absIcon?: string | null) {
   const src = assetUrl(absIcon);
   if (src) {
     return <img src={src} alt="" className="dock-mini-img" draggable={false} />;
@@ -323,6 +326,7 @@ export const ButtonDock: React.FC<Props> = ({
   onStartDockDrag,
   onClose,
 }) => {
+  const { t } = useI18n();
   const [tab, setTab] = useState<"presets" | "vault">("presets");
   const categories = Array.from(new Set(PRESET_BUTTONS.map((p) => p.category)));
 
@@ -338,17 +342,17 @@ export const ButtonDock: React.FC<Props> = ({
             className={`dock-tab ${tab === "presets" ? "dock-tab-active" : ""}`}
             onClick={() => setTab("presets")}
           >
-            기본 프리셋
+            {t("dock.presets")}
           </button>
           <button
             type="button"
             className={`dock-tab ${tab === "vault" ? "dock-tab-active" : ""}`}
             onClick={() => setTab("vault")}
           >
-            보관함 ({vault.length})
+            {t("dock.vault", { count: vault.length })}
           </button>
         </div>
-        <button type="button" className="icon-btn" onClick={onClose} title="보관함 닫기">
+        <button type="button" className="icon-btn" onClick={onClose} title={t("dock.close")}>
           <X size={14} />
         </button>
       </div>
@@ -357,10 +361,10 @@ export const ButtonDock: React.FC<Props> = ({
         {tab === "vault" ? (
           <>
             <div className="dock-hint">
-              편집 모드에서 버튼을 여기로 끌어다 보관하거나, 보관된 버튼을 그리드로 끌어다 놓으세요.
+              {t("dock.vaultHint")}
             </div>
             {vault.length === 0 ? (
-              <div className="dock-empty">보관된 버튼이 없습니다.</div>
+              <div className="dock-empty">{t("dock.vaultEmpty")}</div>
             ) : (
               <div className="dock-list">
                 {vault.map((v) => (
@@ -381,7 +385,7 @@ export const ButtonDock: React.FC<Props> = ({
                       <button
                         type="button"
                         className="icon-btn"
-                        title="빈 칸에 꺼내기"
+                        title={t("dock.takeOut")}
                         onClick={() => onQuickInsert(v, v.id)}
                       >
                         <Plus size={13} />
@@ -389,7 +393,7 @@ export const ButtonDock: React.FC<Props> = ({
                       <button
                         type="button"
                         className="icon-btn"
-                        title="영구 삭제"
+                        title={t("dock.deleteForever")}
                         onClick={() => onRemoveFromVault(v.id)}
                       >
                         <Trash2 size={13} />
@@ -403,15 +407,17 @@ export const ButtonDock: React.FC<Props> = ({
         ) : (
           <div className="dock-presets">
             <div className="dock-hint">
-              원하는 버튼을 그리드로 드래그하거나 + 버튼으로 빈 칸에 바로 추가하세요.
+              {t("dock.presetHint")}
             </div>
             {categories.map((cat) => (
               <div key={cat} className="dock-cat-group">
-                <div className="dock-cat-title">{cat}</div>
+                <div className="dock-cat-title">{t(cat)}</div>
                 <div className="dock-list">
                   {PRESET_BUTTONS.filter((p) => p.category === cat).map((p, idx) => {
+                    // The label is fixed in the language active at the moment of insertion
                     const createCopy = (): ButtonItem => ({
                       ...structuredClone(p.item),
+                      label: t(p.labelKey),
                       id: `btn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
                     });
                     return (
@@ -426,12 +432,12 @@ export const ButtonDock: React.FC<Props> = ({
                       >
                         <div className="dock-item-left">
                           {renderMiniIcon(p.item, null)}
-                          <span className="dock-item-label">{p.item.label}</span>
+                          <span className="dock-item-label">{t(p.labelKey)}</span>
                         </div>
                         <button
                           type="button"
                           className="icon-btn"
-                          title="빈 칸에 추가"
+                          title={t("dock.addToFree")}
                           onClick={() => onQuickInsert(createCopy())}
                         >
                           <Plus size={13} />

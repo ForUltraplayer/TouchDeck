@@ -1,4 +1,5 @@
 use crate::config::{read_discord_config, DiscordConfig};
+use crate::i18n::{detail, t, Text};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs::{File, OpenOptions};
@@ -66,7 +67,7 @@ impl DiscordBridge {
     }
 
     pub fn send(&self, cmd: DiscordCommand) -> Result<(), String> {
-        self.tx.send(cmd).map_err(|e| format!("Discord 워커 전송 실패: {e}"))
+        self.tx.send(cmd).map_err(|e| detail(Text::DiscordSendFailed, e))
     }
 }
 
@@ -242,7 +243,7 @@ fn http_post_form(host: &str, path: &str, body: &str) -> Result<Value, String> {
             }
             out.extend_from_slice(&buf[..read as usize]);
         }
-        serde_json::from_slice(&out).map_err(|e| format!("OAuth JSON 파싱 실패: {e}"))
+        serde_json::from_slice(&out).map_err(|e| detail(Text::OAuthJsonParseFailed, e))
     }
 }
 
@@ -260,12 +261,12 @@ fn exchange_code(client_id: &str, client_secret: &str, code: &str) -> Result<(St
             .get("error_description")
             .and_then(|v| v.as_str())
             .unwrap_or(err);
-        return Err(format!("OAuth 오류: {desc}"));
+        return Err(detail(Text::OAuthError, desc));
     }
     let access = val
         .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "access_token 없음".to_string())?
+        .ok_or_else(|| t(Text::OAuthNoAccessToken).to_string())?
         .to_string();
     let refresh = val
         .get("refresh_token")
@@ -286,7 +287,7 @@ fn refresh_oauth(client_id: &str, client_secret: &str, refresh_token: &str) -> R
     let access = val
         .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "refresh 실패".to_string())?
+        .ok_or_else(|| t(Text::OAuthRefreshFailed).to_string())?
         .to_string();
     let refresh = val
         .get("refresh_token")
@@ -433,7 +434,7 @@ fn run_worker(app: AppHandle, state_lock: Arc<Mutex<DiscordState>>, rx: Receiver
                 } else if pending_auth {
                     pending_auth = false;
                     update_state(&app, &state_lock, |s| {
-                        s.last_error = Some("실행 중인 Discord 데스크톱 앱을 찾지 못했습니다.".into());
+                        s.last_error = Some(t(Text::DiscordAppNotFound).into());
                     });
                 }
             }
@@ -482,7 +483,7 @@ fn run_worker(app: AppHandle, state_lock: Arc<Mutex<DiscordState>>, rx: Receiver
                                 let msg = val
                                     .pointer("/data/message")
                                     .and_then(|v| v.as_str())
-                                    .unwrap_or("Discord RPC 오류")
+                                    .unwrap_or(t(Text::DiscordRpcError))
                                     .to_string();
 
                                 if cmd_name == "AUTHENTICATE" && !tried_refresh {

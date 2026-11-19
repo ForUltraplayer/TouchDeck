@@ -12,6 +12,7 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../api";
+import { LANGUAGES, translate, useI18n, type TKey } from "../i18n";
 import type {
   AudioDeviceInfo,
   ButtonAction,
@@ -32,9 +33,9 @@ interface Props {
   onClose: () => void;
 }
 
-const DEFAULT_NEW_ITEM = (): ButtonItem => ({
+const DEFAULT_NEW_ITEM = (label: string): ButtonItem => ({
   id: `btn-${Date.now()}`,
-  label: "새 버튼",
+  label,
   showLabel: true,
   fontSize: 13,
   textColor: "#FFFFFF",
@@ -54,6 +55,10 @@ const DEFAULT_NEW_ITEM = (): ButtonItem => ({
 });
 
 const ACCENT_PRESETS = ["#38BDF8", "#34D399", "#FBBF24", "#F472B6", "#A78BFA", "#F87171"];
+
+// A label still counts as untouched if it is the default of any language, so it survives a language switch
+const isDefaultLabel = (label: string) =>
+  LANGUAGES.some((l) => translate(l, "editor.newButton") === label);
 
 function keyEventToTokens(e: React.KeyboardEvent): string[] | null {
   const ignore = ["Control", "Shift", "Alt", "Meta"];
@@ -89,8 +94,9 @@ export const ButtonEditorModal: React.FC<Props> = ({
   onTransferToPage,
   onClose,
 }) => {
+  const { t } = useI18n();
   const [item, setItem] = useState<ButtonItem>(() =>
-    initialItem ? structuredClone(initialItem) : DEFAULT_NEW_ITEM()
+    initialItem ? structuredClone(initialItem) : DEFAULT_NEW_ITEM(t("editor.newButton"))
   );
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
@@ -180,7 +186,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
     try {
       const selected = await openDialog({
         multiple: false,
-        filters: [{ name: "실행 파일 / 바로가기", extensions: ["lnk", "exe", "cmd", "bat", "vbs", "url"] }],
+        filters: [{ name: t("editor.filterApp"), extensions: ["lnk", "exe", "cmd", "bat", "vbs", "url"] }],
       });
       if (!selected || typeof selected !== "string") return;
       setBusy(true);
@@ -188,21 +194,21 @@ export const ButtonEditorModal: React.FC<Props> = ({
       if (resolved.kind === "url") {
         setItem((prev) => ({
           ...prev,
-          label: prev.label === "새 버튼" ? resolved.label : prev.label,
+          label: isDefaultLabel(prev.label) ? resolved.label : prev.label,
           iconPath: resolved.iconPath ?? prev.iconPath,
           action: { type: "url", url: resolved.url },
         }));
       } else if (resolved.kind === "folder") {
         setItem((prev) => ({
           ...prev,
-          label: prev.label === "새 버튼" ? resolved.label : prev.label,
+          label: isDefaultLabel(prev.label) ? resolved.label : prev.label,
           iconPath: resolved.iconPath ?? prev.iconPath,
           action: { type: "folder", path: resolved.exe },
         }));
       } else {
         setItem((prev) => ({
           ...prev,
-          label: prev.label === "새 버튼" ? resolved.label : prev.label,
+          label: isDefaultLabel(prev.label) ? resolved.label : prev.label,
           iconPath: resolved.iconPath ?? prev.iconPath,
           action: {
             type: "app",
@@ -216,7 +222,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
       }
       setErrorMsg("");
     } catch (e) {
-      setErrorMsg(`파일 정보를 읽지 못했습니다: ${String(e)}`);
+      setErrorMsg(t("editor.fileReadFailed", { error: String(e) }));
     } finally {
       setBusy(false);
     }
@@ -230,13 +236,13 @@ export const ButtonEditorModal: React.FC<Props> = ({
       const resolved = await api.inspectDrop(selected);
       setItem((prev) => ({
         ...prev,
-        label: prev.label === "새 버튼" ? resolved.label : prev.label,
+        label: isDefaultLabel(prev.label) ? resolved.label : prev.label,
         iconPath: resolved.iconPath ?? prev.iconPath,
         action: { type: "folder", path: selected },
       }));
       setErrorMsg("");
     } catch (e) {
-      setErrorMsg(`폴더 정보를 읽지 못했습니다: ${String(e)}`);
+      setErrorMsg(t("editor.folderReadFailed", { error: String(e) }));
     } finally {
       setBusy(false);
     }
@@ -259,7 +265,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
     try {
       const selected = await openDialog({
         multiple: false,
-        filters: [{ name: "이미지", extensions: ["png", "jpg", "jpeg", "webp", "ico", "svg"] }],
+        filters: [{ name: t("editor.filterImage"), extensions: ["png", "jpg", "jpeg", "webp", "ico", "svg"] }],
       });
       if (!selected || typeof selected !== "string") return;
       setBusy(true);
@@ -267,7 +273,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
       setItem((prev) => ({ ...prev, iconPath: rel }));
       setErrorMsg("");
     } catch (e) {
-      setErrorMsg(`아이콘 이미지를 가져오지 못했습니다: ${String(e)}`);
+      setErrorMsg(t("editor.iconImportFailed", { error: String(e) }));
     } finally {
       setBusy(false);
     }
@@ -319,7 +325,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
         onSubmit={handleSubmit}
       >
         <div className="modal-header">
-          <span>버튼 편집 (칸 #{slotIndex + 1})</span>
+          <span>{t("editor.title", { n: slotIndex + 1 })}</span>
           <button type="button" className="icon-btn" onClick={onClose}>
             <X size={16} />
           </button>
@@ -327,13 +333,13 @@ export const ButtonEditorModal: React.FC<Props> = ({
 
         <div className="modal-body">
           <div className="field-row">
-            <label>라벨</label>
+            <label>{t("editor.label")}</label>
             <div className="inline-group">
               <input
                 type="text"
                 value={item.label}
                 onChange={(e) => setItem({ ...item, label: e.target.value })}
-                placeholder="버튼 이름"
+                placeholder={t("editor.labelPlaceholder")}
               />
               <label className="check-pill">
                 <input
@@ -341,35 +347,35 @@ export const ButtonEditorModal: React.FC<Props> = ({
                   checked={item.showLabel}
                   onChange={(e) => setItem({ ...item, showLabel: e.target.checked })}
                 />
-                표시
+                {t("editor.showLabel")}
               </label>
             </div>
           </div>
 
           <div className="field-row">
-            <label>동작 유형</label>
+            <label>{t("editor.actionType")}</label>
             <select
               value={item.action.type}
               onChange={(e) => setActionType(e.target.value as ButtonAction["type"])}
             >
-              <option value="app">앱 실행 / 창 복원</option>
-              <option value="folder">폴더 열기</option>
-              <option value="url">웹 URL 열기</option>
-              <option value="volume">볼륨 / 마이크 음소거</option>
-              <option value="media">미디어 제어 (재생/곡 넘김)</option>
-              <option value="audio_device">오디오 출력 장치 전환</option>
-              <option value="discord">Discord 양방향 제어 (음소거/데픈/나가기)</option>
-              <option value="hotkey">키보드 단축키</option>
-              <option value="multi">멀티 액션 (순차 실행)</option>
-              <option value="page">페이지 이동</option>
-              <option value="widget">정보 타일 (시계 / CPU·RAM / 재생 곡)</option>
+              <option value="app">{t("type.app")}</option>
+              <option value="folder">{t("type.folder")}</option>
+              <option value="url">{t("type.url")}</option>
+              <option value="volume">{t("type.volume")}</option>
+              <option value="media">{t("type.media")}</option>
+              <option value="audio_device">{t("type.audioDevice")}</option>
+              <option value="discord">{t("type.discord")}</option>
+              <option value="hotkey">{t("type.hotkey")}</option>
+              <option value="multi">{t("type.multi")}</option>
+              <option value="page">{t("type.page")}</option>
+              <option value="widget">{t("type.widget")}</option>
             </select>
           </div>
 
           {item.action.type === "app" && (
             <>
               <div className="field-row">
-                <label>실행 파일</label>
+                <label>{t("editor.exe")}</label>
                 <div className="inline-group">
                   <input
                     type="text"
@@ -380,16 +386,16 @@ export const ButtonEditorModal: React.FC<Props> = ({
                         action: { ...item.action, type: "app", exe: e.target.value },
                       })
                     }
-                    placeholder="C:\...\app.exe (또는 찾아보기)"
+                    placeholder={t("editor.exePlaceholder")}
                   />
                   <button type="button" className="btn-secondary" onClick={handleBrowseApp} disabled={busy}>
-                    <FolderOpen size={14} /> 찾기
+                    <FolderOpen size={14} /> {t("editor.browse")}
                   </button>
                 </div>
               </div>
               <div className="field-row two-col">
                 <div>
-                  <label>실행 인자</label>
+                  <label>{t("editor.args")}</label>
                   <input
                     type="text"
                     value={item.action.args ?? ""}
@@ -402,11 +408,11 @@ export const ButtonEditorModal: React.FC<Props> = ({
                         },
                       })
                     }
-                    placeholder='예: --profile-directory="Profile 8"'
+                    placeholder={t("editor.argsPlaceholder")}
                   />
                 </div>
                 <div>
-                  <label>창 추적 프로세스명</label>
+                  <label>{t("editor.procName")}</label>
                   <input
                     type="text"
                     value={item.action.procName ?? ""}
@@ -419,7 +425,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
                         },
                       })
                     }
-                    placeholder="예: Spotify, claude, Code"
+                    placeholder={t("editor.procPlaceholder")}
                   />
                 </div>
               </div>
@@ -437,14 +443,14 @@ export const ButtonEditorModal: React.FC<Props> = ({
                     })
                   }
                 />
-                이미 맨 앞일 때 다시 누르면 최소화 토글
+                {t("editor.toggleMinimize")}
               </label>
             </>
           )}
 
           {item.action.type === "folder" && (
             <div className="field-row">
-              <label>폴더 경로</label>
+              <label>{t("editor.folderPath")}</label>
               <div className="inline-group">
                 <input
                   type="text"
@@ -455,7 +461,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
                   placeholder="X:\work"
                 />
                 <button type="button" className="btn-secondary" onClick={handleBrowseFolder} disabled={busy}>
-                  <FolderOpen size={14} /> 찾기
+                  <FolderOpen size={14} /> {t("editor.browse")}
                 </button>
               </div>
             </div>
@@ -463,7 +469,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
 
           {item.action.type === "url" && (
             <div className="field-row">
-              <label>URL 주소</label>
+              <label>{t("editor.url")}</label>
               <div className="inline-group">
                 <input
                   type="text"
@@ -478,9 +484,9 @@ export const ButtonEditorModal: React.FC<Props> = ({
                   className="btn-secondary"
                   onClick={handleFetchFavicon}
                   disabled={busy}
-                  title="사이트 파비콘 아이콘 가져오기"
+                  title={t("editor.faviconTitle")}
                 >
-                  <Globe size={14} /> 파비콘
+                  <Globe size={14} /> {t("editor.favicon")}
                 </button>
               </div>
             </div>
@@ -489,7 +495,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
           {item.action.type === "volume" && (
             <div className="field-row two-col">
               <div>
-                <label>대상 / 동작</label>
+                <label>{t("editor.volTarget")}</label>
                 <select
                   value={
                     item.action.target === "mic"
@@ -516,15 +522,15 @@ export const ButtonEditorModal: React.FC<Props> = ({
                     }
                   }}
                 >
-                  <option value="up">스피커 볼륨 올리기 (+)</option>
-                  <option value="down">스피커 볼륨 내리기 (-)</option>
-                  <option value="mute">스피커 음소거 토글</option>
-                  <option value="mic_mute">마이크 음소거 토글</option>
+                  <option value="up">{t("editor.volUp")}</option>
+                  <option value="down">{t("editor.volDown")}</option>
+                  <option value="mute">{t("editor.volMute")}</option>
+                  <option value="mic_mute">{t("editor.micMute")}</option>
                 </select>
               </div>
               {item.action.target !== "mic" && item.action.command !== "mute" && (
                 <div>
-                  <label>조절 폭 (%)</label>
+                  <label>{t("editor.volStep")}</label>
                   <input
                     type="number"
                     min={1}
@@ -549,7 +555,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
 
           {item.action.type === "media" && (
             <div className="field-row">
-              <label>미디어 명령</label>
+              <label>{t("editor.mediaCommand")}</label>
               <select
                 value={item.action.command}
                 onChange={(e) =>
@@ -562,17 +568,17 @@ export const ButtonEditorModal: React.FC<Props> = ({
                   })
                 }
               >
-                <option value="play_pause">재생 / 일시정지</option>
-                <option value="next">다음 곡</option>
-                <option value="prev">이전 곡</option>
-                <option value="stop">정지</option>
+                <option value="play_pause">{t("media.playPause")}</option>
+                <option value="next">{t("media.next")}</option>
+                <option value="prev">{t("media.prev")}</option>
+                <option value="stop">{t("media.stop")}</option>
               </select>
             </div>
           )}
 
           {item.action.type === "audio_device" && (
             <div className="field-row">
-              <label>오디오 출력 장치</label>
+              <label>{t("editor.audioDevice")}</label>
               <select
                 value={item.action.deviceId ?? ""}
                 onChange={(e) =>
@@ -585,10 +591,10 @@ export const ButtonEditorModal: React.FC<Props> = ({
                   })
                 }
               >
-                <option value="">다음 출력 장치로 순환 전환 (스피커 ↔ 헤드셋)</option>
+                <option value="">{t("editor.audioCycle")}</option>
                 {audioDevices.map((d) => (
                   <option key={d.id} value={d.id}>
-                    {d.name} {d.isDefault ? "(현재 기본)" : ""}
+                    {d.name} {d.isDefault ? t("editor.audioDefault") : ""}
                   </option>
                 ))}
               </select>
@@ -597,7 +603,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
 
           {item.action.type === "discord" && (
             <div className="field-row">
-              <label>Discord 음성 명령 (설정에서 RPC 연동 필요)</label>
+              <label>{t("editor.discordCommand")}</label>
               <select
                 value={item.action.command}
                 onChange={(e) =>
@@ -610,20 +616,20 @@ export const ButtonEditorModal: React.FC<Props> = ({
                   })
                 }
               >
-                <option value="mute">마이크 음소거 토글</option>
-                <option value="deaf">헤드셋 소리 끄기(Deafen) 토글</option>
-                <option value="disconnect">음성 채널 나가기</option>
+                <option value="mute">{t("editor.micMute")}</option>
+                <option value="deaf">{t("editor.discordDeaf")}</option>
+                <option value="disconnect">{t("editor.discordDisconnect")}</option>
               </select>
             </div>
           )}
 
           {item.action.type === "hotkey" && (
             <div className="field-row">
-              <label>키보드 단축키</label>
+              <label>{t("type.hotkey")}</label>
               <div className="inline-group">
                 <input
                   type="text"
-                  value={recordingKey ? "원하는 키 조합을 누르세요..." : hotkeyText}
+                  value={recordingKey ? t("editor.hotkeyPrompt") : hotkeyText}
                   readOnly={recordingKey}
                   onChange={(e) => setHotkeyText(e.target.value)}
                   onKeyDown={(e) => {
@@ -643,7 +649,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
                   className={recordingKey ? "btn-primary" : "btn-secondary"}
                   onClick={() => setRecordingKey((v) => !v)}
                 >
-                  {recordingKey ? "대기 중..." : "키 녹화"}
+                  {t(recordingKey ? "editor.hotkeyWaiting" : "editor.hotkeyRecord")}
                 </button>
               </div>
             </div>
@@ -652,7 +658,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
           {item.action.type === "multi" && (
             <div className="field-row">
               <div className="section-title-row">
-                <label>순차 실행 스텝 ({item.action.steps.length})</label>
+                <label>{t("editor.steps", { count: item.action.steps.length })}</label>
                 <button
                   type="button"
                   className="btn-secondary"
@@ -665,7 +671,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
                     setItem({ ...item, action: { type: "multi", steps: next } });
                   }}
                 >
-                  <Plus size={13} /> 스텝 추가
+                  <Plus size={13} /> {t("editor.addStep")}
                 </button>
               </div>
               <div className="multi-list">
@@ -690,11 +696,11 @@ export const ButtonEditorModal: React.FC<Props> = ({
                         setItem({ ...item, action: { type: "multi", steps: cur } });
                       }}
                     >
-                      <option value="app">앱</option>
-                      <option value="folder">폴더</option>
+                      <option value="app">{t("editor.stepApp")}</option>
+                      <option value="folder">{t("editor.stepFolder")}</option>
                       <option value="url">URL</option>
-                      <option value="media">미디어</option>
-                      <option value="hotkey">단축키</option>
+                      <option value="media">{t("editor.stepMedia")}</option>
+                      <option value="hotkey">{t("editor.stepHotkey")}</option>
                     </select>
                     <input
                       type="text"
@@ -727,7 +733,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
                           cur[sIdx].action = { type: "media", command: v as "play_pause" | "next" | "prev" | "stop" };
                         setItem({ ...item, action: { type: "multi", steps: cur } });
                       }}
-                      placeholder="경로 / URL / 키"
+                      placeholder={t("editor.stepPlaceholder")}
                     />
                     <input
                       type="number"
@@ -744,7 +750,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
                         };
                         setItem({ ...item, action: { type: "multi", steps: cur } });
                       }}
-                      title="다음 스텝까지 대기(ms)"
+                      title={t("editor.stepDelay")}
                     />
                     <button
                       type="button"
@@ -766,7 +772,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
 
           {item.action.type === "page" && (
             <div className="field-row">
-              <label>이동할 페이지</label>
+              <label>{t("editor.targetPage")}</label>
               <select
                 value={item.action.pageIndex}
                 onChange={(e) =>
@@ -788,7 +794,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
           {item.action.type === "widget" && (
             <>
               <div className="field-row">
-                <label>정보 타일 종류</label>
+                <label>{t("editor.widgetKind")}</label>
                 <select
                   value={item.action.kind}
                   onChange={(e) => {
@@ -809,9 +815,9 @@ export const ButtonEditorModal: React.FC<Props> = ({
                     });
                   }}
                 >
-                  <option value="clock">시계 (시간 / 날짜)</option>
-                  <option value="sys_stats">하드웨어 모니터 (CPU / GPU / 온도 / 클럭 / RAM)</option>
-                  <option value="now_playing">현재 재생 중인 곡</option>
+                  <option value="clock">{t("editor.widgetClock")}</option>
+                  <option value="sys_stats">{t("editor.widgetSysStats")}</option>
+                  <option value="now_playing">{t("editor.widgetNowPlaying")}</option>
                 </select>
               </div>
               {item.action.kind === "sys_stats" && (() => {
@@ -819,21 +825,21 @@ export const ButtonEditorModal: React.FC<Props> = ({
                   item.action.metrics && item.action.metrics.length > 0
                     ? item.action.metrics
                     : ["cpu_pct", "ram_pct"];
-                const opts: [string, string][] = [
-                  ["cpu_pct", "CPU 사용률 (%)"],
-                  ["cpu_clk", "CPU 클럭 (GHz)"],
-                  ["cpu_temp", "CPU 온도 (°C)"],
-                  ["ram_pct", "RAM 사용률 (%)"],
-                  ["gpu_pct", "GPU 사용률 (%)"],
-                  ["gpu_temp", "GPU 온도 (°C)"],
-                  ["gpu_clk", "GPU 클럭 (MHz)"],
-                  ["vram_pct", "VRAM 사용률 (%)"],
+                const opts: [string, TKey][] = [
+                  ["cpu_pct", "metric.cpuPct"],
+                  ["cpu_clk", "metric.cpuClk"],
+                  ["cpu_temp", "metric.cpuTemp"],
+                  ["ram_pct", "metric.ramPct"],
+                  ["gpu_pct", "metric.gpuPct"],
+                  ["gpu_temp", "metric.gpuTemp"],
+                  ["gpu_clk", "metric.gpuClk"],
+                  ["vram_pct", "metric.vramPct"],
                 ];
                 return (
                   <div className="field-row">
-                    <label>표시할 항목 (최대 4개)</label>
+                    <label>{t("editor.metrics")}</label>
                     <div className="metric-grid">
-                      {opts.map(([key, label]) => {
+                      {opts.map(([key, labelKey]) => {
                         const checked = selected.includes(key);
                         return (
                           <label key={key} className="check-pill">
@@ -855,14 +861,14 @@ export const ButtonEditorModal: React.FC<Props> = ({
                                 });
                               }}
                             />
-                            {label}
+                            {t(labelKey)}
                           </label>
                         );
                       })}
                     </div>
                     {selected.includes("cpu_temp") && (
                       <div className="hint-text">
-                        * CPU 온도는 LibreHardwareMonitor / OpenHardwareMonitor 실행 중이거나 ACPI 지원 보드에서 표시됩니다.
+                        {t("editor.cpuTempHint")}
                       </div>
                     )}
                   </div>
@@ -874,10 +880,10 @@ export const ButtonEditorModal: React.FC<Props> = ({
           <div className="divider" />
 
           <div className="field-row">
-            <label>아이콘 이미지</label>
+            <label>{t("editor.icon")}</label>
             <div className="inline-group">
               <button type="button" className="btn-secondary" onClick={handleBrowseIcon} disabled={busy}>
-                <ImageIcon size={14} /> 이미지 선택
+                <ImageIcon size={14} /> {t("common.pickImage")}
               </button>
               {item.iconPath && (
                 <button
@@ -885,18 +891,18 @@ export const ButtonEditorModal: React.FC<Props> = ({
                   className="btn-secondary"
                   onClick={() => setItem({ ...item, iconPath: null })}
                 >
-                  <RotateCcw size={14} /> 기본 아이콘
+                  <RotateCcw size={14} /> {t("editor.defaultIcon")}
                 </button>
               )}
               <span className="hint-text">
-                {item.iconPath ? "이미지 적용됨" : "기본 벡터 아이콘"}
+                {t(item.iconPath ? "editor.iconApplied" : "editor.iconDefault")}
               </span>
             </div>
           </div>
 
           <div className="field-row two-col">
             <div>
-              <label>코너 배지 (구분 태그)</label>
+              <label>{t("editor.badge")}</label>
               <input
                 type="text"
                 maxLength={8}
@@ -904,11 +910,11 @@ export const ButtonEditorModal: React.FC<Props> = ({
                 onChange={(e) =>
                   setItem({ ...item, badge: e.target.value ? e.target.value : null })
                 }
-                placeholder="예: 회사, 개인, DEV"
+                placeholder={t("editor.badgePlaceholder")}
               />
             </div>
             <div>
-              <label>상단 포인트 컬러</label>
+              <label>{t("editor.accent")}</label>
               <div className="accent-row">
                 {ACCENT_PRESETS.map((c) => (
                   <button
@@ -926,7 +932,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
                     type="button"
                     className="icon-btn"
                     onClick={() => setItem({ ...item, accentColor: null })}
-                    title="포인트 컬러 제거"
+                    title={t("editor.accentClear")}
                   >
                     <X size={12} />
                   </button>
@@ -937,7 +943,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
 
           <div className="field-row two-col">
             <div>
-              <label>글자 크기 (수동 모드 px)</label>
+              <label>{t("editor.fontSize")}</label>
               <input
                 type="number"
                 min={9}
@@ -954,7 +960,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
               />
             </div>
             <div>
-              <label>글자 색상</label>
+              <label>{t("editor.textColor")}</label>
               <input
                 type="color"
                 value={item.textColor}
@@ -976,14 +982,14 @@ export const ButtonEditorModal: React.FC<Props> = ({
                   }
                 }}
               />
-              이 버튼만 개별 배경색 / 투명도 사용
+              {t("editor.customBg")}
             </label>
           </div>
 
           {useCustomBg && (
             <div className="field-row two-col">
               <div>
-                <label>버튼 배경색</label>
+                <label>{t("editor.bgColor")}</label>
                 <input
                   type="color"
                   value={item.bgColor || "#333333"}
@@ -991,7 +997,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
                 />
               </div>
               <div>
-                <label>버튼 투명도 ({item.bgOpacity ?? 90}%)</label>
+                <label>{t("editor.bgOpacity", { value: item.bgOpacity ?? 90 })}</label>
                 <input
                   type="range"
                   min={0}
@@ -1007,7 +1013,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
             <>
               <div className="divider" />
               <div className="field-row">
-                <label>다른 페이지로 복제 / 이동</label>
+                <label>{t("editor.transfer")}</label>
                 <div className="inline-group">
                   <select
                     value={transferPageIdx}
@@ -1025,7 +1031,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
                     disabled={transferPageIdx === currentPageIndex}
                     onClick={() => onTransferToPage(slotIndex, transferPageIdx, false)}
                   >
-                    <Copy size={13} /> 복제
+                    <Copy size={13} /> {t("common.duplicate")}
                   </button>
                   <button
                     type="button"
@@ -1033,7 +1039,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
                     disabled={transferPageIdx === currentPageIndex}
                     onClick={() => onTransferToPage(slotIndex, transferPageIdx, true)}
                   >
-                    이동
+                    {t("common.move")}
                   </button>
                 </div>
               </div>
@@ -1051,15 +1057,15 @@ export const ButtonEditorModal: React.FC<Props> = ({
                 className="btn-danger"
                 onClick={() => onDelete(slotIndex)}
               >
-                <Trash2 size={14} /> 삭제
+                <Trash2 size={14} /> {t("common.delete")}
               </button>
               <button
                 type="button"
                 className="btn-secondary"
                 onClick={() => onMoveToVault(slotIndex)}
-                title="이 버튼을 보관함으로 옮기기"
+                title={t("editor.vaultTitle")}
               >
-                <Archive size={14} /> 보관
+                <Archive size={14} /> {t("editor.vault")}
               </button>
             </div>
           ) : (
@@ -1067,10 +1073,10 @@ export const ButtonEditorModal: React.FC<Props> = ({
           )}
           <div className="inline-group">
             <button type="button" className="btn-secondary" onClick={onClose}>
-              취소
+              {t("common.cancel")}
             </button>
             <button type="submit" className="btn-primary" disabled={busy}>
-              저장
+              {t("common.save")}
             </button>
           </div>
         </div>

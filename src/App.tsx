@@ -21,11 +21,13 @@ import { ButtonEditorModal } from "./components/ButtonEditorModal";
 import { ButtonTile } from "./components/ButtonTile";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { useDeckWindowLayout } from "./hooks/useDeckWindowLayout";
+import { createI18n, I18nProvider } from "./i18n";
 import type {
   ButtonItem,
   DeckConfig,
   DiscordConfig,
   DiscordState,
+  Language,
   NowPlayingInfo,
   RunningStatus,
   SystemStats,
@@ -39,18 +41,25 @@ const PAD_X = 14;
 const PAD_Y = 10;
 const DOCK_W = 256;
 
-function formatClock(): { time: string; date: string } {
+function formatClock(language: Language): { time: string; date: string } {
   const now = new Date();
   const hh = String(now.getHours()).padStart(2, "0");
   const mm = String(now.getMinutes()).padStart(2, "0");
   const month = now.getMonth() + 1;
   const day = now.getDate();
-  const week = ["일", "월", "화", "수", "목", "금", "토"][now.getDay()];
+  const week = new Intl.DateTimeFormat(language, { weekday: "short" }).format(now);
   return { time: `${hh}:${mm}`, date: `${month}/${day} (${week})` };
 }
 
-export const App: React.FC = () => {
+export const App: React.FC<{ systemLanguage: Language }> = ({ systemLanguage }) => {
   const [config, setConfig] = useState<DeckConfig | null>(null);
+  // Follows Windows until the config is loaded or while it has no explicit choice
+  const language = config?.language ?? systemLanguage;
+  const i18n = useMemo(() => createI18n(language), [language]);
+  const { t } = i18n;
+  // Long-lived callbacks read the translator from a ref so a language change never re-creates them
+  const tRef = useRef(t);
+  tRef.current = t;
   const [pageIndex, setPageIndex] = useState(0);
   const [editMode, setEditMode] = useState(false);
   const [dockOpen, setDockOpen] = useState(false);
@@ -74,7 +83,7 @@ export const App: React.FC = () => {
   const [systemStats, setSystemStats] = useState<SystemStats | null>(null);
   const [runningStatus, setRunningStatus] = useState<RunningStatus | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
-  const [clockText, setClockText] = useState(formatClock);
+  const [clockText, setClockText] = useState(() => formatClock(language));
   const [toast, setToast] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -126,7 +135,7 @@ export const App: React.FC = () => {
     try {
       await api.saveConfig(latest);
     } catch (e) {
-      showToast(`저장 실패: ${String(e)}`);
+      showToast(tRef.current("toast.saveFailed", { error: String(e) }));
     } finally {
       saveInFlightRef.current = false;
       // Changed while saving and no debounce timer left to pick it up
@@ -190,9 +199,8 @@ export const App: React.FC = () => {
   // Initial config and Discord state load
   useEffect(() => {
     reloadConfig().catch((e) => {
-      const msg = `설정 로드 오류: ${String(e)}`;
-      setLoadError(msg);
-      showToast(msg);
+      setLoadError(String(e));
+      showToast(tRef.current("app.configLoadError", { error: String(e) }));
     });
     api.getDiscordState().then(setDiscordState).catch(() => {});
   }, [reloadConfig, showToast]);
@@ -366,7 +374,7 @@ export const App: React.FC = () => {
             statsInFlightRef.current = false;
           });
       }
-      const nextClk = formatClock();
+      const nextClk = formatClock(language);
       setClockText((prev) =>
         prev.time === nextClk.time && prev.date === nextClk.date ? prev : nextClk
       );
@@ -380,7 +388,12 @@ export const App: React.FC = () => {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", poll);
     };
-  }, [pageIndex, config?.pages]);
+  }, [pageIndex, config?.pages, language]);
+
+  // Selects language-specific glyph fallbacks for CJK text
+  useEffect(() => {
+    document.documentElement.lang = language;
+  }, [language]);
 
   // Win+D defense handled natively on a Rust background thread (zero JS IPC polling)
   useEffect(() => {
@@ -497,7 +510,7 @@ export const App: React.FC = () => {
         const initCfg = configRef.current;
         if (!initCfg) return;
         if (initCfg.window.locked) {
-          showToast("잠금 상태입니다. 잠금을 해제한 뒤 드롭하세요.");
+          showToast(tRef.current("toast.lockedDrop"));
           return;
         }
 
@@ -516,10 +529,14 @@ export const App: React.FC = () => {
               if (targetSlot !== null && curPageAfter?.slots[String(targetSlot)]) {
                 const rel = await api.importImage(droppedPath, "icon");
                 iconUpdates.push({ slot: targetSlot, iconPath: rel });
-                showToast(`아이콘 이미지 변경: ${curPageAfter.slots[String(targetSlot)].label}`);
+                showToast(
+                  tRef.current("toast.iconChanged", {
+                    label: curPageAfter.slots[String(targetSlot)].label,
+                  })
+                );
               } else if (!bgRel) {
                 bgRel = await api.importImage(droppedPath, "bg");
-                showToast("배경 이미지 테마가 적용되었습니다.");
+                showToast(tRef.current("toast.bgApplied"));
               }
               continue;
             }
@@ -550,10 +567,10 @@ export const App: React.FC = () => {
                     },
             };
             addedEntries.push({ slot: targetSlot, item: newBtn });
-            showToast(`등록됨: ${newBtn.label}`);
+            showToast(tRef.current("toast.registered", { label: newBtn.label }));
             targetSlot = null;
           } catch (e) {
-            showToast(`등록 실패: ${String(e)}`);
+            showToast(tRef.current("toast.registerFailed", { error: String(e) }));
           }
         }
 
@@ -599,14 +616,19 @@ export const App: React.FC = () => {
             }
           }
           if (slotToUse === null) {
-            showToast("현재 페이지에 빈 칸이 없습니다.");
+            showToast(tRef.current("toast.noFreeSlot"));
             break;
           }
           // A drop onto an occupied tile moves the old button to the vault
           const displaced = nextSlots[String(slotToUse)];
           if (displaced) {
             nextVault = [...nextVault, displaced];
-            showToast(`"${entry.item.label}" 배치됨 (기존 "${displaced.label}" 보관함 이동)`);
+            showToast(
+              tRef.current("toast.placedDisplaced", {
+                label: entry.item.label,
+                displaced: displaced.label,
+              })
+            );
           }
           nextSlots[String(slotToUse)] = entry.item;
         }
@@ -684,7 +706,7 @@ export const App: React.FC = () => {
           showToast(res.message);
         }
       } catch (e) {
-        showToast(`실행 오류: ${String(e)}`);
+        showToast(tRef.current("toast.execError", { error: String(e) }));
       }
     },
     [showToast]
@@ -728,7 +750,7 @@ export const App: React.FC = () => {
       }
     }
     if (freeSlot === null) {
-      showToast("현재 페이지에 빈 칸이 없습니다.");
+      showToast(t("toast.noFreeSlot"));
       return;
     }
     const copyItem: ButtonItem = {
@@ -740,7 +762,7 @@ export const App: React.FC = () => {
       idx === pageIndex ? { ...p, slots: nextSlots } : p
     );
     persistConfig({ ...config, pages: nextPages });
-    showToast(`"${src.label}" 복제됨`);
+    showToast(t("toast.duplicated", { label: src.label }));
   };
 
   const handleOpenContextMenu = useCallback((slotIdx: number, e: React.MouseEvent) => {
@@ -793,7 +815,7 @@ export const App: React.FC = () => {
     persistConfig({ ...cur, pages: nextPages, vault: nextVault });
     setEditingSlot(null);
     setDockOpen(true);
-    showToast(`"${target.label}" 버튼을 보관함에 넣었습니다.`);
+    showToast(tRef.current("toast.movedToVault", { label: target.label }));
   };
 
   const handleRemoveFromVault = (id: string) => {
@@ -826,8 +848,8 @@ export const App: React.FC = () => {
     persistConfig({ ...cur, pages: nextPages, vault: nextVault });
     showToast(
       displaced
-        ? `"${item.label}" 배치됨 (기존 "${displaced.label}" 보관함 이동)`
-        : `"${item.label}" 추가됨`
+        ? tRef.current("toast.placedDisplaced", { label: item.label, displaced: displaced.label })
+        : tRef.current("toast.added", { label: item.label })
     );
   };
 
@@ -842,7 +864,7 @@ export const App: React.FC = () => {
       }
     }
     if (freeSlot === null) {
-      showToast("현재 페이지에 빈 칸이 없습니다.");
+      showToast(t("toast.noFreeSlot"));
       return;
     }
     placeDockItemAtSlot(item, freeSlot, removeVaultId ?? null);
@@ -863,7 +885,7 @@ export const App: React.FC = () => {
       }
     }
     if (freeSlot === null) {
-      showToast(`"${targetPage.name}" 페이지에 빈 칸이 없습니다.`);
+      showToast(t("toast.pageFull", { page: targetPage.name }));
       return;
     }
 
@@ -886,7 +908,7 @@ export const App: React.FC = () => {
 
     persistConfig({ ...config, pages: nextPages });
     setEditingSlot(null);
-    showToast(`${targetPage.name} 페이지로 ${move ? "이동" : "복제"}되었습니다.`);
+    showToast(t(move ? "toast.movedToPage" : "toast.copiedToPage", { page: targetPage.name }));
   };
 
   const handleSwapSlot = (fromSlot: number, toSlot: number) => {
@@ -1086,24 +1108,26 @@ export const App: React.FC = () => {
   if (!config || !currentPage) {
     return (
       <div className="loading-shell" style={{ flexDirection: "column", gap: 10, padding: 16 }}>
-        <span>{loadError ?? "TouchDeck 불러오는 중..."}</span>
+        <span>
+          {loadError === null ? t("app.loading") : t("app.configLoadError", { error: loadError })}
+        </span>
         {loadError && (
           <div style={{ display: "flex", gap: 8 }}>
             <button
               type="button"
               className="btn-primary"
               onClick={() =>
-                reloadConfig().catch((e) => setLoadError(`설정 로드 오류: ${String(e)}`))
+                reloadConfig().catch((e) => setLoadError(String(e)))
               }
             >
-              다시 시도
+              {t("app.retry")}
             </button>
             <button
               type="button"
               className="btn-secondary"
               onClick={() => getCurrentWindow().hide()}
             >
-              숨기기
+              {t("app.hide")}
             </button>
           </div>
         )}
@@ -1135,6 +1159,7 @@ export const App: React.FC = () => {
   const stageAlignRight = !shellRect && dockOnLeft;
 
   return (
+    <I18nProvider value={i18n}>
     <div className={`deck-stage ${stageAlignRight ? "deck-stage-right" : ""}`}>
       <div
         className={`deck-shell ${shellRect?.animate ? "deck-shell-animate" : ""}`}
@@ -1194,7 +1219,7 @@ export const App: React.FC = () => {
         >
           <span className="brand-dot" />
           <span className="brand-title">{currentPage.name}</span>
-          {editMode && <span className="edit-pill">편집 중</span>}
+          {editMode && <span className="edit-pill">{t("header.editing")}</span>}
         </div>
 
         <div className="header-actions">
@@ -1203,16 +1228,16 @@ export const App: React.FC = () => {
               type="button"
               className="update-pill"
               onClick={() => setSettingsOpen(true)}
-              title={`새 버전 v${updateInfo.latestVersion} 업데이트 가능`}
+              title={t("header.updateTitle", { version: updateInfo.latestVersion })}
             >
-              v{updateInfo.latestVersion} 업데이트
+              {t("header.update", { version: updateInfo.latestVersion })}
             </button>
           )}
           <button
             type="button"
             className={`hdr-btn ${dockOpen ? "hdr-btn-active" : ""}`}
             onClick={() => setDockOpen((v) => !v)}
-            title="버튼 보관함 / 기본 프리셋 서랍"
+            title={t("header.dock")}
           >
             <Package size={14} />
           </button>
@@ -1221,7 +1246,7 @@ export const App: React.FC = () => {
               type="button"
               className={`hdr-btn ${editMode ? "hdr-btn-active" : ""}`}
               onClick={() => setEditMode((v) => !v)}
-              title="편집 모드 (버튼 추가/드래그 이동)"
+              title={t("header.editMode")}
             >
               <Pencil size={14} />
             </button>
@@ -1237,7 +1262,7 @@ export const App: React.FC = () => {
                 window: { ...config.window, locked: nextLocked },
               });
             }}
-            title={config.window.locked ? "잠금 해제" : "위치/편집 잠금"}
+            title={t(config.window.locked ? "header.unlock" : "common.lock")}
           >
             {config.window.locked ? <Lock size={14} /> : <Unlock size={14} />}
           </button>
@@ -1245,7 +1270,7 @@ export const App: React.FC = () => {
             type="button"
             className="hdr-btn"
             onClick={() => setSettingsOpen(true)}
-            title="설정 및 테마"
+            title={t("header.settings")}
           >
             <Settings size={14} />
           </button>
@@ -1257,7 +1282,7 @@ export const App: React.FC = () => {
               api.setUserHidden(true).catch(() => {});
               getCurrentWindow().hide();
             }}
-            title="트레이로 숨기기"
+            title={t("header.hideToTray")}
           >
             <Minus size={14} />
           </button>
@@ -1338,7 +1363,7 @@ export const App: React.FC = () => {
               className="page-arrow"
               disabled={pageIndex <= 0}
               onClick={() => setPageIndex((i) => Math.max(0, i - 1))}
-              title="이전 페이지"
+              title={t("footer.prevPage")}
             >
               <ChevronLeft size={16} />
             </button>
@@ -1361,7 +1386,7 @@ export const App: React.FC = () => {
               className="page-arrow"
               disabled={pageIndex >= config.pages.length - 1}
               onClick={() => setPageIndex((i) => Math.min(config.pages.length - 1, i + 1))}
-              title="다음 페이지"
+              title={t("footer.nextPage")}
             >
               <ChevronRight size={16} />
             </button>
@@ -1401,7 +1426,7 @@ export const App: React.FC = () => {
                   handleExecute(ctxItem);
                 }}
               >
-                <Play size={13} /> 실행
+                <Play size={13} /> {t("menu.run")}
               </button>
             )}
             <button
@@ -1412,7 +1437,7 @@ export const App: React.FC = () => {
                 setEditingSlot(ctxSlot);
               }}
             >
-              <Pencil size={13} /> 편집
+              <Pencil size={13} /> {t("menu.edit")}
             </button>
             <button
               type="button"
@@ -1422,7 +1447,7 @@ export const App: React.FC = () => {
                 handleDuplicateSlot(ctxSlot);
               }}
             >
-              <Copy size={13} /> 복제
+              <Copy size={13} /> {t("common.duplicate")}
             </button>
             <button
               type="button"
@@ -1432,7 +1457,7 @@ export const App: React.FC = () => {
                 handleMoveToVault(ctxSlot);
               }}
             >
-              <Package size={13} /> 보관함으로 이동
+              <Package size={13} /> {t("menu.moveToVault")}
             </button>
             <div className="ctx-menu-sep" />
             <button
@@ -1443,7 +1468,7 @@ export const App: React.FC = () => {
                 handleDeleteSlot(ctxSlot);
               }}
             >
-              <Trash2 size={13} /> 삭제
+              <Trash2 size={13} /> {t("common.delete")}
             </button>
           </div>
         );
@@ -1495,6 +1520,7 @@ export const App: React.FC = () => {
       )}
     </div>
     </div>
+    </I18nProvider>
   );
 };
 

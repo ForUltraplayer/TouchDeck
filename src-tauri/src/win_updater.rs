@@ -1,3 +1,4 @@
+use crate::i18n::{detail, t, Text};
 use serde::Serialize;
 use serde_json::Value;
 use std::fs;
@@ -32,7 +33,7 @@ fn parse_url_parts(raw_url: &str) -> Result<(String, u16, String, bool), String>
     let stripped = raw_url
         .strip_prefix("https://")
         .or_else(|| raw_url.strip_prefix("http://"))
-        .ok_or_else(|| format!("지원하지 않는 URL: {raw_url}"))?;
+        .ok_or_else(|| detail(Text::UnsupportedUrl, raw_url))?;
 
     let (authority, path_query) = match stripped.find('/') {
         Some(idx) => (&stripped[..idx], &stripped[idx..]),
@@ -117,7 +118,7 @@ fn winhttp_get(raw_url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
             std::ptr::null_mut(),
         );
         if status >= 400 {
-            return Err(format!("HTTP 오류 상태 코드: {status}"));
+            return Err(detail(Text::HttpErrorStatus, status));
         }
 
         let mut out = Vec::new();
@@ -138,7 +139,7 @@ fn winhttp_get(raw_url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
             }
             out.extend_from_slice(&buf[..read as usize]);
             if out.len() > max_bytes {
-                return Err("다운로드 크기가 제한을 초과했습니다.".into());
+                return Err(t(Text::DownloadTooLarge).into());
             }
         }
         Ok(out)
@@ -176,12 +177,12 @@ fn pick_portable_exe_asset(val: &Value) -> Option<String> {
 pub fn check_for_update() -> Result<UpdateInfo, String> {
     let api_url = format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest");
     let bytes = winhttp_get(&api_url, 2 * 1024 * 1024)?;
-    let val: Value = serde_json::from_slice(&bytes).map_err(|e| format!("JSON 파싱 실패: {e}"))?;
+    let val: Value = serde_json::from_slice(&bytes).map_err(|e| detail(Text::JsonParseFailed, e))?;
 
     let tag = val
         .get("tag_name")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "릴리즈 태그 정보를 찾지 못했습니다.".to_string())?;
+        .ok_or_else(|| t(Text::ReleaseTagNotFound).to_string())?;
     let latest_version = tag.trim().trim_start_matches(['v', 'V']).to_string();
     let current_version = env!("CARGO_PKG_VERSION").to_string();
 
@@ -222,29 +223,26 @@ fn is_release_asset_url(url: &str) -> bool {
 
 pub fn download_and_apply_update(app: &AppHandle, download_url: &str) -> Result<(), String> {
     if !is_release_asset_url(download_url) {
-        return Err("허용되지 않은 다운로드 주소입니다. 릴리즈 페이지에서 직접 다운로드해 주세요.".into());
+        return Err(t(Text::DownloadUrlNotAllowed).into());
     }
 
     let cur_exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let cur_dir = cur_exe
         .parent()
-        .ok_or_else(|| "실행 경로 확인 실패".to_string())?;
+        .ok_or_else(|| t(Text::ExePathFailed).to_string())?;
 
     // Ensure current directory is writable before downloading
     let probe = cur_dir.join(".touchdeck_write_test");
-    fs::write(&probe, b"1").map_err(|_| {
-        "설치 폴더에 쓰기 권한이 없어 자동 교체할 수 없습니다. 릴리즈 페이지에서 직접 다운로드해 주세요."
-            .to_string()
-    })?;
+    fs::write(&probe, b"1").map_err(|_| t(Text::InstallDirNotWritable).to_string())?;
     let _ = fs::remove_file(&probe);
 
     let bytes = winhttp_get(download_url, 128 * 1024 * 1024)?;
     if bytes.len() < 1_000_000 || &bytes[..2] != b"MZ" {
-        return Err("다운로드된 실행 파일이 올바르지 않습니다.".into());
+        return Err(t(Text::DownloadedExeInvalid).into());
     }
 
     let new_exe = std::env::temp_dir().join("touchdeck_update_new.exe");
-    fs::write(&new_exe, &bytes).map_err(|e| format!("임시 파일 저장 실패: {e}"))?;
+    fs::write(&new_exe, &bytes).map_err(|e| detail(Text::TempFileSaveFailed, e))?;
 
     let pid = std::process::id();
     let bat_path = std::env::temp_dir().join("touchdeck_apply_update.cmd");
@@ -276,13 +274,13 @@ pub fn download_and_apply_update(app: &AppHandle, download_url: &str) -> Result<
         src = new_exe.to_string_lossy(),
         dst = cur_exe.to_string_lossy()
     );
-    fs::write(&bat_path, script.as_bytes()).map_err(|e| format!("업데이트 스크립트 실패: {e}"))?;
+    fs::write(&bat_path, script.as_bytes()).map_err(|e| detail(Text::UpdateScriptFailed, e))?;
 
     Command::new("cmd.exe")
         .args(["/c", &bat_path.to_string_lossy()])
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
-        .map_err(|e| format!("업데이터 실행 실패: {e}"))?;
+        .map_err(|e| detail(Text::UpdaterLaunchFailed, e))?;
 
     app.exit(0);
     Ok(())

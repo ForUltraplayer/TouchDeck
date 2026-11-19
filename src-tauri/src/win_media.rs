@@ -1,3 +1,4 @@
+use crate::i18n::{detail, t, Text};
 use crate::win_com::ComGuard;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -162,7 +163,7 @@ pub fn adjust_volume(command: &str, step: u8, target: &str) -> Result<VolumeStat
                 vol.SetMute(muted, std::ptr::null())
                     .map_err(|e| e.to_string())?;
             }
-            _ => return Err(format!("알 수 없는 볼륨 명령: {command}")),
+            _ => return Err(detail(Text::UnknownVolumeCommand, command)),
         }
 
         let level = (next * 100.0).round().clamp(0.0, 100.0) as u8;
@@ -250,14 +251,14 @@ struct IPolicyConfigRaw {
 pub fn switch_audio_device(device_id: Option<&str>) -> Result<String, String> {
     let devices = list_audio_devices()?;
     if devices.is_empty() {
-        return Err("활성 오디오 출력 장치가 없습니다.".into());
+        return Err(t(Text::NoActiveOutputDevice).into());
     }
 
     let target = if let Some(req_id) = device_id.filter(|s| !s.is_empty()) {
         devices
             .iter()
             .find(|d| d.id == req_id)
-            .ok_or_else(|| "지정한 오디오 장치를 찾을 수 없습니다.".to_string())?
+            .ok_or_else(|| t(Text::AudioDeviceNotFound).to_string())?
     } else {
         let cur_idx = devices.iter().position(|d| d.is_default).unwrap_or(0);
         let next_idx = (cur_idx + 1) % devices.len();
@@ -366,7 +367,7 @@ pub fn send_media_command(command: &str) -> Result<(), String> {
         "next" => VK_MEDIA_NEXT_TRACK,
         "prev" => VK_MEDIA_PREV_TRACK,
         "stop" => VK_MEDIA_STOP,
-        _ => return Err(format!("알 수 없는 미디어 명령: {command}")),
+        _ => return Err(detail(Text::UnknownMediaCommand, command)),
     };
     tap_vk(vk, true);
     Ok(())
@@ -436,11 +437,11 @@ pub fn send_hotkey(keys: &[String]) -> Result<(), String> {
         if raw.trim().is_empty() {
             continue;
         }
-        let parsed = parse_vk(raw).ok_or_else(|| format!("지원하지 않는 키: {}", raw.trim()))?;
+        let parsed = parse_vk(raw).ok_or_else(|| detail(Text::UnsupportedKey, raw.trim()))?;
         vks.push(parsed);
     }
     if vks.is_empty() {
-        return Err("유효한 단축키가 없습니다.".into());
+        return Err(t(Text::NoValidHotkey).into());
     }
 
     let mut inputs = Vec::with_capacity(vks.len() * 2);
@@ -508,6 +509,6 @@ mod tests {
     fn send_hotkey_rejects_unrecognized_key() {
         let keys = vec!["Ctrl".to_string(), "NotARealKey".to_string()];
         let err = send_hotkey(&keys).unwrap_err();
-        assert!(err.contains("지원하지 않는 키"));
+        assert!(err.contains("NotARealKey"));
     }
 }

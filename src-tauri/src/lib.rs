@@ -1,4 +1,5 @@
 mod config;
+mod i18n;
 mod win_com;
 mod win_discord;
 mod win_focus;
@@ -12,9 +13,11 @@ use config::{
     copy_image_to_assets, get_data_dir, import_config_with_backup, is_portable_mode, load_config,
     resolve_asset_path, save_config_from_ui, ButtonAction, ButtonItem, DeckConfig,
 };
+use i18n::{detail, t, Text};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
@@ -41,6 +44,27 @@ struct ExecuteResult {
     message: Option<String>,
 }
 
+// Tray menu items with the language their labels currently show, kept so the
+// labels can follow a language change without a restart.
+struct TrayLabels {
+    items: [(MenuItem<tauri::Wry>, Text); 4],
+    lang: Mutex<i18n::Lang>,
+}
+
+// Call after a config save/import, off the main thread and outside the config lock.
+fn refresh_tray_labels(app: &AppHandle) {
+    let Some(tray) = app.try_state::<TrayLabels>() else {
+        return;
+    };
+    let lang = i18n::current();
+    let shown = std::mem::replace(&mut *tray.lang.lock().unwrap_or_else(|e| e.into_inner()), lang);
+    if shown != lang {
+        for (item, text) in &tray.items {
+            let _ = item.set_text(text.in_lang(lang));
+        }
+    }
+}
+
 // Commands that touch files or COM are async + spawn_blocking: sync commands run
 // on the main thread, and a stall there can stall the Explorer-owned desktop window.
 #[tauri::command]
@@ -56,10 +80,19 @@ fn take_config_notice() -> Option<String> {
 }
 
 #[tauri::command]
-async fn save_config_cmd(config: DeckConfig) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || save_config_from_ui(&config))
-        .await
-        .map_err(|e| e.to_string())?
+async fn save_config_cmd(app: AppHandle, config: DeckConfig) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_config_from_ui(&config)?;
+        refresh_tray_labels(&app);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn get_system_language() -> String {
+    i18n::system().code().into()
 }
 
 #[tauri::command]
@@ -150,7 +183,7 @@ fn execute_single_action(
             let name = win_media::switch_audio_device(device_id.as_deref())?;
             Ok(ExecuteResult {
                 volume: win_media::get_volume_state().ok(),
-                message: Some(format!("출력 장치: {name}")),
+                message: Some(detail(Text::OutputDevice, name)),
             })
         }
         ButtonAction::Hotkey { keys } => {
@@ -161,16 +194,16 @@ fn execute_single_action(
             })
         }
         ButtonAction::Discord { command } => {
-            let bridge = discord.ok_or_else(|| "Discord 브리지가 초기화되지 않았습니다.".to_string())?;
+            let bridge = discord.ok_or_else(|| t(Text::DiscordBridgeNotReady).to_string())?;
             let st = bridge.get_state();
             if !st.authenticated {
-                return Err("Discord RPC가 연결되지 않았습니다. 설정에서 승인해 주세요.".into());
+                return Err(t(Text::DiscordNotConnected).into());
             }
             match command.as_str() {
                 "mute" => bridge.send(DiscordCommand::ToggleMute)?,
                 "deaf" => bridge.send(DiscordCommand::ToggleDeaf)?,
                 "disconnect" => bridge.send(DiscordCommand::DisconnectVoice)?,
-                _ => return Err(format!("알 수 없는 Discord 명령: {command}")),
+                _ => return Err(detail(Text::UnknownDiscordCommand, command)),
             }
             Ok(ExecuteResult {
                 volume: None,
@@ -400,7 +433,7 @@ fn enable_portable_mode_sync() -> Result<String, String> {
     let copy_res = (|| -> Result<(), String> {
         if current.join("config.json").exists() {
             std::fs::copy(current.join("config.json"), target.join("config.json"))
-                .map_err(|e| format!("config.json 복사 실패: {e}"))?;
+                .map_err(|e| detail(Text::ConfigCopyFailed, e))?;
         }
         if let Ok(entries) = std::fs::read_dir(current.join("assets")) {
             for entry in entries.flatten() {
@@ -408,7 +441,7 @@ fn enable_portable_mode_sync() -> Result<String, String> {
                 if p.is_file() {
                     if let Some(name) = p.file_name() {
                         std::fs::copy(&p, target.join("assets").join(name))
-                            .map_err(|e| format!("에셋 복사 실패: {e}"))?;
+                            .map_err(|e| detail(Text::AssetCopyFailed, e))?;
                     }
                 }
             }
@@ -445,16 +478,20 @@ struct LegacyLauncherEntry {
 }
 
 #[tauri::command]
-async fn import_launchers_json(path: String) -> Result<usize, String> {
-    tauri::async_runtime::spawn_blocking(move || import_launchers_json_sync(&path))
-        .await
-        .map_err(|e| e.to_string())?
+async fn import_launchers_json(app: AppHandle, path: String) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let imported = import_launchers_json_sync(&path)?;
+        refresh_tray_labels(&app);
+        Ok(imported)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn import_launchers_json_sync(path: &str) -> Result<usize, String> {
     let legacy_path = Path::new(path);
     if !legacy_path.exists() {
-        return Err(format!("파일을 찾을 수 없습니다: {path}"));
+        return Err(detail(Text::FileNotFound, path));
     }
     let text = std::fs::read_to_string(legacy_path).map_err(|e| e.to_string())?;
     let map: serde_json::Map<String, serde_json::Value> =
@@ -523,7 +560,7 @@ fn import_launchers_json_sync(path: &str) -> Result<usize, String> {
         if cfg.pages.is_empty() {
             cfg.pages.push(config::DeckPage {
                 id: "page-1".into(),
-                name: "메인".into(),
+                name: t(Text::PageMain).into(),
                 slots: new_slots,
             });
         } else {
@@ -535,14 +572,19 @@ fn import_launchers_json_sync(path: &str) -> Result<usize, String> {
 }
 
 #[tauri::command]
-async fn export_config_file(path: String, config: DeckConfig) -> Result<(), String> {
+async fn export_config_file(
+    app: AppHandle,
+    path: String,
+    config: DeckConfig,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         // The export strips secrets, so it must never land on the live config.json.
         let live = std::fs::canonicalize(get_data_dir()?.join("config.json")).ok();
         if live.is_some() && std::fs::canonicalize(&path).ok() == live {
-            return Err("사용 중인 config.json에는 내보낼 수 없습니다. 다른 위치를 선택해 주세요.".into());
+            return Err(t(Text::ExportOntoLiveConfig).into());
         }
         save_config_from_ui(&config)?;
+        refresh_tray_labels(&app);
         // Exported files are meant to be shared or copied around: keep the
         // Discord client id but never the secret or the tokens.
         let mut exported = config;
@@ -557,15 +599,17 @@ async fn export_config_file(path: String, config: DeckConfig) -> Result<(), Stri
 }
 
 #[tauri::command]
-async fn import_config_file(path: String) -> Result<DeckConfig, String> {
+async fn import_config_file(app: AppHandle, path: String) -> Result<DeckConfig, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
         let cfg: DeckConfig = serde_json::from_str(&text)
-            .map_err(|e| format!("올바른 TouchDeck 설정 JSON이 아닙니다: {e}"))?;
+            .map_err(|e| detail(Text::InvalidConfigJson, e))?;
         if cfg.pages.is_empty() {
-            return Err("페이지 데이터가 없는 설정 파일입니다.".into());
+            return Err(t(Text::ConfigHasNoPages).into());
         }
-        import_config_with_backup(move |_| cfg)
+        let saved = import_config_with_backup(move |_| cfg)?;
+        refresh_tray_labels(&app);
+        Ok(saved)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -588,17 +632,30 @@ pub fn run() {
             let bridge = DiscordBridge::start(app.handle().clone());
             app.manage(bridge);
 
-            let show_i = MenuItem::with_id(app, "show", "TouchDeck 보이기", true, None::<&str>)?;
-            let hide_i = MenuItem::with_id(app, "hide", "숨기기", true, None::<&str>)?;
-            let settings_i =
-                MenuItem::with_id(app, "settings", "설정 열기", true, None::<&str>)?;
-            let quit_i = MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_i, &hide_i, &settings_i, &quit_i])?;
+            // Loaded before the tray menu is built: this sets the backend language.
+            let startup_cfg = load_config();
+            let lang = i18n::current();
+            let item = |id: &str, text: Text| {
+                MenuItem::with_id(app, id, text.in_lang(lang), true, None::<&str>)
+                    .map(|item| (item, text))
+            };
+            let items = [
+                item("show", Text::TrayShow)?,
+                item("hide", Text::TrayHide)?,
+                item("settings", Text::TraySettings)?,
+                item("quit", Text::TrayQuit)?,
+            ];
+            let menu =
+                Menu::with_items(app, &[&items[0].0, &items[1].0, &items[2].0, &items[3].0])?;
+            app.manage(TrayLabels {
+                items,
+                lang: Mutex::new(lang),
+            });
 
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_skip_taskbar(true);
                 win_window::refresh_autostart_if_enabled();
-                if let Ok(cfg) = load_config() {
+                if let Ok(cfg) = startup_cfg {
                     if let (Some(x), Some(y)) = (cfg.window.x, cfg.window.y) {
                         let cols = cfg.grid.columns as f64;
                         let rows = cfg.grid.rows as f64;
@@ -699,6 +756,7 @@ pub fn run() {
             get_config,
             take_config_notice,
             save_config_cmd,
+            get_system_language,
             get_env_info,
             inspect_drop,
             fetch_favicon,

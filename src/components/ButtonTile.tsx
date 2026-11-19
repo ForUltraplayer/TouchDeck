@@ -25,6 +25,7 @@ import {
   VolumeX,
 } from "lucide-react";
 import { assetUrl, hexToRgba } from "../api";
+import { useI18n } from "../i18n";
 import type {
   ButtonItem,
   DiscordState,
@@ -161,6 +162,7 @@ export const ButtonTile: React.FC<Props> = React.memo(({
   onContextMenu,
   onStartSlotDrag,
 }) => {
+  const { t } = useI18n();
   const volHoldRef = useRef<{
     holdTimer: number | null;
     repeatTimer: number | null;
@@ -203,7 +205,7 @@ export const ButtonTile: React.FC<Props> = React.memo(({
           e.preventDefault();
           onEdit(slotIndex);
         }}
-        title="파일/바로가기를 끌어다 놓거나 눌러서 추가"
+        title={t("tile.emptyTitle")}
       >
         <Plus size={20} className="empty-plus" />
       </button>
@@ -310,7 +312,7 @@ export const ButtonTile: React.FC<Props> = React.memo(({
       {item.action.type === "app" && isRunning && (
         <span
           className={`running-dot ${isForeground ? "running-dot-fg" : ""}`}
-          title={isForeground ? "현재 활성 창" : "실행 중"}
+          title={t(isForeground ? "tile.foreground" : "tile.running")}
         />
       )}
 
@@ -330,7 +332,7 @@ export const ButtonTile: React.FC<Props> = React.memo(({
 
       {item.action.type === "discord" && (
         !discordState?.authenticated ? (
-          <span className="vol-badge dc-offline">미연결</span>
+          <span className="vol-badge dc-offline">{t("tile.dcOffline")}</span>
         ) : item.action.command === "mute" ? (
           <span className={`vol-badge ${discordState.muted ? "vol-muted" : "dc-on"}`}>
             {discordState.muted ? "DC MUTE" : "DC ON"}
@@ -436,7 +438,7 @@ export const ButtonTile: React.FC<Props> = React.memo(({
             <>
               <Music size={Math.round(cellSize * 0.22)} color={nowPlaying?.playing ? "#34D399" : "#94A3B8"} />
               <div className="widget-track">
-                {nowPlaying ? nowPlaying.title : "재생 중인 곡 없음"}
+                {nowPlaying ? nowPlaying.title : t("tile.noTrack")}
               </div>
               {nowPlaying?.artist && <div className="widget-sub">{nowPlaying.artist}</div>}
             </>

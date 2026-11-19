@@ -135,7 +135,11 @@ export interface DeckConfig {
   vault?: ButtonItem[];
   discord?: DiscordConfig;
   autoCheckUpdate?: boolean;
+  // null or absent follows the Windows display language
+  language?: Language | null;
 }
+
+export type Language = "ko" | "en" | "ja";
 
 export interface UpdateInfo {
   currentVersion: string;

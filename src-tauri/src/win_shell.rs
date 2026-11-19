@@ -1,4 +1,5 @@
 use crate::config::get_data_dir;
+use crate::i18n::{detail, t, Text};
 use crate::win_com::ComGuard;
 use image::{imageops::FilterType, RgbaImage};
 use serde::Serialize;
@@ -130,7 +131,7 @@ fn parse_url_file(url_path: &str) -> Result<(String, Option<String>), String> {
     }
     match url {
         Some(u) => Ok((u, icon)),
-        None => Err("URL= 항목을 찾지 못했습니다.".into()),
+        None => Err(t(Text::UrlEntryNotFound).into()),
     }
 }
 
@@ -407,7 +408,7 @@ pub fn fetch_favicon_asset(raw_url: &str) -> Result<String, String> {
     let authority = without_scheme.split('/').next().unwrap_or("");
     let host = authority.split(':').next().unwrap_or("").trim();
     if host.is_empty() {
-        return Err("유효한 도메인이 아닙니다.".into());
+        return Err(t(Text::InvalidDomain).into());
     }
 
     let is_local_or_ip = host.eq_ignore_ascii_case("localhost")
@@ -439,15 +440,15 @@ pub fn fetch_favicon_asset(raw_url: &str) -> Result<String, String> {
     };
 
     if bytes.is_empty() {
-        return Err("파비콘 응답이 비어 있습니다.".into());
+        return Err(t(Text::FaviconEmpty).into());
     }
-    let img = image::load_from_memory(&bytes).map_err(|e| format!("이미지 디코드 실패: {e}"))?;
+    let img = image::load_from_memory(&bytes).map_err(|e| detail(Text::ImageDecodeFailed, e))?;
     let resized = if img.width() < 64 {
         img.resize_exact(128, 128, FilterType::Lanczos3)
     } else {
         img
     };
-    resized.save(&dest).map_err(|e| format!("파비콘 저장 실패: {e}"))?;
+    resized.save(&dest).map_err(|e| detail(Text::FaviconSaveFailed, e))?;
     Ok(rel_path)
 }
 

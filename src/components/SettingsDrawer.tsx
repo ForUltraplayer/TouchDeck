@@ -6,6 +6,7 @@ import {
 } from "@tauri-apps/plugin-dialog";
 import { Download, FolderOpen, Image as ImageIcon, Plus, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import { api } from "../api";
+import { toLanguage, useI18n } from "../i18n";
 import type { DeckConfig, DiscordState, EnvInfo, UpdateInfo } from "../types";
 
 interface Props {
@@ -31,6 +32,7 @@ export const SettingsDrawer: React.FC<Props> = ({
   onReloadFromDisk,
   onClose,
 }) => {
+  const { t } = useI18n();
   const [envInfo, setEnvInfo] = useState<EnvInfo | null>(null);
   const [statusMsg, setStatusMsg] = useState<string>("");
   const [updating, setUpdating] = useState(false);
@@ -58,7 +60,7 @@ export const SettingsDrawer: React.FC<Props> = ({
     try {
       const selected = await openDialog({
         multiple: false,
-        filters: [{ name: "배경 이미지", extensions: ["png", "jpg", "jpeg", "webp"] }],
+        filters: [{ name: t("settings.filterBg"), extensions: ["png", "jpg", "jpeg", "webp"] }],
       });
       if (!selected || typeof selected !== "string") return;
       const rel = await api.importImage(selected, "bg");
@@ -71,7 +73,7 @@ export const SettingsDrawer: React.FC<Props> = ({
         backgroundDim: config.theme.backgroundDim === 35 ? 20 : config.theme.backgroundDim,
       });
     } catch (e) {
-      setStatusMsg(`배경 이미지 적용 실패: ${String(e)}`);
+      setStatusMsg(t("settings.bgFailed", { error: String(e) }));
     }
   };
 
@@ -79,7 +81,7 @@ export const SettingsDrawer: React.FC<Props> = ({
     const nextIdx = config.pages.length;
     const nextPages = [
       ...config.pages,
-      { id: `page-${Date.now()}`, name: `페이지 ${nextIdx + 1}`, slots: {} },
+      { id: `page-${Date.now()}`, name: t("settings.pageName", { n: nextIdx + 1 }), slots: {} },
     ];
     onChange({ ...config, pages: nextPages });
     onSwitchPage(nextIdx);
@@ -89,14 +91,20 @@ export const SettingsDrawer: React.FC<Props> = ({
     if (config.pages.length <= 1) return;
     try {
       const confirmed = await confirmDialog(
-        `"${config.pages[idx].name}" 페이지와 그 안의 버튼 ${
-          Object.keys(config.pages[idx].slots).length
-        }개를 삭제합니다. 삭제한 뒤에는 되돌릴 수 없습니다. 계속할까요?`,
-        { title: "페이지 삭제", kind: "warning" }
+        t("settings.deletePageConfirm", {
+          name: config.pages[idx].name,
+          count: Object.keys(config.pages[idx].slots).length,
+        }),
+        {
+          title: t("settings.deletePage"),
+          kind: "warning",
+          okLabel: t("common.ok"),
+          cancelLabel: t("common.cancel"),
+        }
       );
       if (!confirmed) return;
     } catch (e) {
-      setStatusMsg(`페이지 삭제 확인 실패: ${String(e)}`);
+      setStatusMsg(t("settings.deletePageConfirmFailed", { error: String(e) }));
       return;
     }
     const remapPageAction = (item: DeckConfig["pages"][number]["slots"][string]) => {
@@ -136,52 +144,62 @@ export const SettingsDrawer: React.FC<Props> = ({
     if (!selected || typeof selected !== "string") return;
     try {
       const confirmed = await confirmDialog(
-        "선택한 launchers.json의 버튼으로 1페이지의 버튼 전체를 교체합니다. 가져오기 전에 현재 설정을 백업 파일로 저장합니다. 계속할까요?",
-        { title: "launchers.json 가져오기", kind: "warning" }
+        t("settings.importLaunchersConfirm"),
+        {
+          title: t("settings.importLaunchers"),
+          kind: "warning",
+          okLabel: t("common.ok"),
+          cancelLabel: t("common.cancel"),
+        }
       );
       if (!confirmed) return;
       const count = await api.importLaunchersJson(selected);
-      setStatusMsg(`버튼 ${count}개를 불러왔습니다.`);
+      setStatusMsg(t("settings.launchersImported", { count }));
       onReloadFromDisk();
     } catch (e) {
-      setStatusMsg(`가져오기 실패: ${String(e)}`);
+      setStatusMsg(t("settings.importFailed", { error: String(e) }));
     }
   };
 
   const handleExportConfig = async () => {
     const selected = await saveDialog({
       defaultPath: "touchdeck-backup.json",
-      filters: [{ name: "TouchDeck 설정 백업", extensions: ["json"] }],
+      filters: [{ name: t("settings.filterBackup"), extensions: ["json"] }],
     });
     if (!selected) return;
     try {
       await api.exportConfigFile(selected, config);
-      setStatusMsg(`설정 백업을 저장했습니다: ${selected}`);
+      setStatusMsg(t("settings.backupSaved", { path: selected }));
     } catch (e) {
-      setStatusMsg(`백업 저장 실패: ${String(e)}`);
+      setStatusMsg(t("settings.backupFailed", { error: String(e) }));
     }
   };
 
   const handleImportConfig = async () => {
     const selected = await openDialog({
       multiple: false,
-      filters: [{ name: "TouchDeck 설정 백업", extensions: ["json"] }],
+      filters: [{ name: t("settings.filterBackup"), extensions: ["json"] }],
     });
     if (!selected || typeof selected !== "string") return;
     try {
       const confirmed = await confirmDialog(
-        "선택한 파일의 내용으로 현재 설정 전체(모든 페이지와 버튼, 보관함, 테마, 창 설정)를 교체합니다. 가져오기 전에 현재 설정을 백업 파일로 저장합니다. 계속할까요?",
-        { title: "설정 가져오기", kind: "warning" }
+        t("settings.importConfigConfirm"),
+        {
+          title: t("settings.importConfigTitle"),
+          kind: "warning",
+          okLabel: t("common.ok"),
+          cancelLabel: t("common.cancel"),
+        }
       );
       if (!confirmed) return;
       const restored = await api.importConfigFile(selected);
       if (currentPageIndex >= restored.pages.length) {
         onSwitchPage(0);
       }
-      setStatusMsg("설정 백업을 복원했습니다.");
+      setStatusMsg(t("settings.restored"));
       onReloadFromDisk();
     } catch (e) {
-      setStatusMsg(`설정 복원 실패: ${String(e)}`);
+      setStatusMsg(t("settings.restoreFailed", { error: String(e) }));
     }
   };
 
@@ -190,18 +208,18 @@ export const SettingsDrawer: React.FC<Props> = ({
       const res = await api.setAutostart(checked);
       setEnvInfo((prev) => (prev ? { ...prev, autostart: res } : prev));
     } catch (e) {
-      setStatusMsg(`자동 시작 설정 실패: ${String(e)}`);
+      setStatusMsg(t("settings.autostartFailed", { error: String(e) }));
     }
   };
 
   const handleEnablePortable = async () => {
     try {
       const p = await api.enablePortableMode();
-      setStatusMsg(`포터블 폴더 활성화됨: ${p}`);
+      setStatusMsg(t("settings.portableEnabled", { path: p }));
       const info = await api.getEnvInfo();
       setEnvInfo(info);
     } catch (e) {
-      setStatusMsg(`포터블 전환 실패: ${String(e)}`);
+      setStatusMsg(t("settings.portableFailed", { error: String(e) }));
     }
   };
 
@@ -209,17 +227,36 @@ export const SettingsDrawer: React.FC<Props> = ({
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal-card settings-card" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <span>TouchDeck 설정 및 테마</span>
+          <span>{t("settings.title")}</span>
           <button type="button" className="icon-btn" onClick={onClose}>
             <X size={16} />
           </button>
         </div>
 
         <div className="modal-body">
-          <div className="section-title">그리드 레이아웃</div>
+          <div className="field-row">
+            <label>{t("settings.language")}</label>
+            <select
+              value={config.language ?? ""}
+              onChange={(e) =>
+                onChange({
+                  ...config,
+                  language: e.target.value ? toLanguage(e.target.value) : null,
+                })
+              }
+            >
+              <option value="">{t("settings.languageAuto")}</option>
+              <option value="ko">한국어</option>
+              <option value="en">English</option>
+              <option value="ja">日本語</option>
+            </select>
+          </div>
+
+          <div className="divider" />
+          <div className="section-title">{t("settings.grid")}</div>
           <div className="field-row two-col">
             <div>
-              <label>가로 칸 수 ({config.grid.columns})</label>
+              <label>{t("settings.columns", { value: config.grid.columns })}</label>
               <input
                 type="range"
                 min={2}
@@ -229,7 +266,7 @@ export const SettingsDrawer: React.FC<Props> = ({
               />
             </div>
             <div>
-              <label>세로 줄 수 ({config.grid.rows})</label>
+              <label>{t("settings.rows", { value: config.grid.rows })}</label>
               <input
                 type="range"
                 min={1}
@@ -242,7 +279,7 @@ export const SettingsDrawer: React.FC<Props> = ({
 
           <div className="field-row three-col">
             <div>
-              <label>칸 크기 ({config.grid.cellSize}px)</label>
+              <label>{t("settings.cellSize", { value: config.grid.cellSize })}</label>
               <input
                 type="range"
                 min={76}
@@ -253,7 +290,7 @@ export const SettingsDrawer: React.FC<Props> = ({
               />
             </div>
             <div>
-              <label>간격 ({config.grid.gap}px)</label>
+              <label>{t("settings.gap", { value: config.grid.gap })}</label>
               <input
                 type="range"
                 min={4}
@@ -263,7 +300,7 @@ export const SettingsDrawer: React.FC<Props> = ({
               />
             </div>
             <div>
-              <label>모서리 ({config.grid.borderRadius}px)</label>
+              <label>{t("settings.radius", { value: config.grid.borderRadius })}</label>
               <input
                 type="range"
                 min={0}
@@ -275,11 +312,11 @@ export const SettingsDrawer: React.FC<Props> = ({
           </div>
 
           <div className="divider" />
-          <div className="section-title">전체 배경 & 테마</div>
+          <div className="section-title">{t("settings.theme")}</div>
 
           <div className="field-row two-col">
             <div>
-              <label>배경 방식</label>
+              <label>{t("settings.bgType")}</label>
               <select
                 value={config.theme.backgroundType}
                 onChange={(e) => {
@@ -291,13 +328,13 @@ export const SettingsDrawer: React.FC<Props> = ({
                   updateTheme(patch);
                 }}
               >
-                <option value="solid">단색 + 투명도</option>
-                <option value="gradient">그라데이션</option>
-                <option value="image">배경 이미지 테마</option>
+                <option value="solid">{t("settings.bgSolid")}</option>
+                <option value="gradient">{t("settings.bgGradient")}</option>
+                <option value="image">{t("settings.bgImage")}</option>
               </select>
             </div>
             <div>
-              <label>글꼴</label>
+              <label>{t("settings.font")}</label>
               <input
                 type="text"
                 value={config.theme.fontFamily}
@@ -308,15 +345,15 @@ export const SettingsDrawer: React.FC<Props> = ({
           </div>
 
           <div className="field-row">
-            <label>버튼 스타일 (배경 이미지 사용 시 글래스/투명 추천)</label>
+            <label>{t("settings.buttonStyle")}</label>
             <div className="segmented-group">
               {(
                 [
-                  ["solid", "솔리드"],
-                  ["glass", "반투명 글래스"],
-                  ["transparent", "투명 + 그림자"],
+                  ["solid", "settings.styleSolid"],
+                  ["glass", "settings.styleGlass"],
+                  ["transparent", "settings.styleTransparent"],
                 ] as const
-              ).map(([val, text]) => (
+              ).map(([val, textKey]) => (
                 <button
                   key={val}
                   type="button"
@@ -325,7 +362,7 @@ export const SettingsDrawer: React.FC<Props> = ({
                   }`}
                   onClick={() => updateTheme({ buttonStyle: val })}
                 >
-                  {text}
+                  {t(textKey)}
                 </button>
               ))}
             </div>
@@ -334,7 +371,7 @@ export const SettingsDrawer: React.FC<Props> = ({
           {config.theme.backgroundType !== "image" ? (
             <div className="field-row two-col">
               <div>
-                <label>배경색</label>
+                <label>{t("settings.bgColor")}</label>
                 <input
                   type="color"
                   value={config.theme.backgroundColor}
@@ -342,7 +379,7 @@ export const SettingsDrawer: React.FC<Props> = ({
                 />
               </div>
               <div>
-                <label>패널 투명도 ({config.theme.backgroundOpacity}%)</label>
+                <label>{t("settings.panelOpacity", { value: config.theme.backgroundOpacity })}</label>
                 <input
                   type="range"
                   min={10}
@@ -354,7 +391,7 @@ export const SettingsDrawer: React.FC<Props> = ({
             </div>
           ) : (
             <div className="field-row">
-              <label>배경 이미지 투명도 ({config.theme.backgroundOpacity}%)</label>
+              <label>{t("settings.imageOpacity", { value: config.theme.backgroundOpacity })}</label>
               <input
                 type="range"
                 min={10}
@@ -367,7 +404,7 @@ export const SettingsDrawer: React.FC<Props> = ({
 
           {config.theme.backgroundType === "gradient" && (
             <div className="field-row">
-              <label>그라데이션 끝 색상</label>
+              <label>{t("settings.gradientEnd")}</label>
               <input
                 type="color"
                 value={config.theme.gradientEndColor}
@@ -379,10 +416,10 @@ export const SettingsDrawer: React.FC<Props> = ({
           {config.theme.backgroundType === "image" && (
             <>
               <div className="field-row">
-                <label>테마 배경 이미지</label>
+                <label>{t("settings.themeImage")}</label>
                 <div className="inline-group">
                   <button type="button" className="btn-secondary" onClick={handlePickBgImage}>
-                    <ImageIcon size={14} /> 이미지 선택
+                    <ImageIcon size={14} /> {t("common.pickImage")}
                   </button>
                   {config.theme.backgroundImage && (
                     <button
@@ -396,14 +433,14 @@ export const SettingsDrawer: React.FC<Props> = ({
                         })
                       }
                     >
-                      제거
+                      {t("settings.remove")}
                     </button>
                   )}
                 </div>
               </div>
               <div className="field-row two-col">
                 <div>
-                  <label>이미지 블러 ({config.theme.backgroundBlur}px)</label>
+                  <label>{t("settings.blur", { value: config.theme.backgroundBlur })}</label>
                   <input
                     type="range"
                     min={0}
@@ -413,7 +450,7 @@ export const SettingsDrawer: React.FC<Props> = ({
                   />
                 </div>
                 <div>
-                  <label>어둡기 오버레이 ({config.theme.backgroundDim}%)</label>
+                  <label>{t("settings.dim", { value: config.theme.backgroundDim })}</label>
                   <input
                     type="range"
                     min={0}
@@ -429,7 +466,7 @@ export const SettingsDrawer: React.FC<Props> = ({
           {(config.theme.buttonStyle ?? "solid") === "solid" && (
             <div className="field-row two-col">
               <div>
-                <label>기본 버튼 색</label>
+                <label>{t("settings.defaultButtonColor")}</label>
                 <input
                   type="color"
                   value={config.theme.defaultButtonColor}
@@ -437,7 +474,9 @@ export const SettingsDrawer: React.FC<Props> = ({
                 />
               </div>
               <div>
-                <label>기본 버튼 투명도 ({config.theme.defaultButtonOpacity}%)</label>
+                <label>
+                  {t("settings.defaultButtonOpacity", { value: config.theme.defaultButtonOpacity })}
+                </label>
                 <input
                   type="range"
                   min={10}
@@ -451,9 +490,9 @@ export const SettingsDrawer: React.FC<Props> = ({
 
           <div className="divider" />
           <div className="section-title-row">
-            <span className="section-title">페이지 관리</span>
+            <span className="section-title">{t("settings.pages")}</span>
             <button type="button" className="btn-secondary" onClick={handleAddPage}>
-              <Plus size={14} /> 페이지 추가
+              <Plus size={14} /> {t("settings.addPage")}
             </button>
           </div>
           <div className="page-list">
@@ -470,7 +509,7 @@ export const SettingsDrawer: React.FC<Props> = ({
                   className="icon-btn"
                   disabled={config.pages.length <= 1}
                   onClick={() => handleDeletePage(idx)}
-                  title="페이지 삭제"
+                  title={t("settings.deletePage")}
                 >
                   <Trash2 size={14} />
                 </button>
@@ -479,14 +518,16 @@ export const SettingsDrawer: React.FC<Props> = ({
           </div>
 
           <div className="divider" />
-          <div className="section-title">Discord 양방향 RPC 연동</div>
+          <div className="section-title">{t("settings.discord")}</div>
           <div className="hint-text">
-            상태:{" "}
-            {discordState?.authenticated
-              ? "양방향 동기화 연결됨 (실시간 반영 중)"
-              : discordState?.pipeConnected
-              ? "Discord 앱 연결됨 (승인 대기)"
-              : "미연결"}
+            {t("settings.discordStatus")}{" "}
+            {t(
+              discordState?.authenticated
+                ? "settings.discordSynced"
+                : discordState?.pipeConnected
+                ? "settings.discordPending"
+                : "settings.discordNone"
+            )}
             {discordState?.lastError ? ` · ${discordState.lastError}` : ""}
           </div>
           <div className="field-row two-col">
@@ -517,13 +558,13 @@ export const SettingsDrawer: React.FC<Props> = ({
               onClick={async () => {
                 try {
                   await api.authorizeDiscord(dcClientId.trim(), dcClientSecret.trim());
-                  setStatusMsg("Discord 앱에 뜨는 '승인(Authorize)' 창을 확인해 주세요.");
+                  setStatusMsg(t("settings.discordAuthPrompt"));
                 } catch (e) {
-                  setStatusMsg(`Discord 연결 오류: ${String(e)}`);
+                  setStatusMsg(t("settings.discordError", { error: String(e) }));
                 }
               }}
             >
-              Discord 승인 / 연결
+              {t("settings.discordAuthorize")}
             </button>
             {discordState?.authenticated && (
               <button
@@ -531,16 +572,23 @@ export const SettingsDrawer: React.FC<Props> = ({
                 className="btn-secondary"
                 onClick={() => api.disconnectDiscord().catch(() => {})}
               >
-                연결 해제
+                {t("settings.discordDisconnect")}
               </button>
             )}
           </div>
           <div className="hint-text">
-            * Discord Developer Portal → New Application → OAuth2 Redirects에 <code>http://localhost</code> 추가 후 ID/Secret 입력
+            {t("settings.discordHint")
+              .split("{url}")
+              .map((part, i) => (
+                <React.Fragment key={i}>
+                  {i > 0 && <code>http://localhost</code>}
+                  {part}
+                </React.Fragment>
+              ))}
           </div>
 
           <div className="divider" />
-          <div className="section-title">창 동작 & 외관 옵션</div>
+          <div className="section-title">{t("settings.window")}</div>
           <div className="check-grid">
             <label className="check-pill">
               <input
@@ -548,7 +596,7 @@ export const SettingsDrawer: React.FC<Props> = ({
                 checked={config.theme.autoFontSize !== false}
                 onChange={(e) => updateTheme({ autoFontSize: e.target.checked })}
               />
-              칸 크기 비례 글자 크기
+              {t("settings.autoFont")}
             </label>
             <label className="check-pill">
               <input
@@ -556,7 +604,7 @@ export const SettingsDrawer: React.FC<Props> = ({
                 checked={config.theme.iconRounded !== false}
                 onChange={(e) => updateTheme({ iconRounded: e.target.checked })}
               />
-              아이콘 둥근 모서리
+              {t("settings.iconRounded")}
             </label>
             <label className="check-pill">
               <input
@@ -564,7 +612,7 @@ export const SettingsDrawer: React.FC<Props> = ({
                 checked={config.window.alwaysOnTop}
                 onChange={(e) => updateWindow({ alwaysOnTop: e.target.checked })}
               />
-              항상 위에 고정
+              {t("settings.alwaysOnTop")}
             </label>
             <label className="check-pill">
               <input
@@ -572,7 +620,7 @@ export const SettingsDrawer: React.FC<Props> = ({
                 checked={config.window.desktopLayer}
                 onChange={(e) => updateWindow({ desktopLayer: e.target.checked })}
               />
-              바탕화면 보기(Win+D) 유지
+              {t("settings.desktopLayer")}
             </label>
             <label className="check-pill">
               <input
@@ -580,7 +628,7 @@ export const SettingsDrawer: React.FC<Props> = ({
                 checked={config.window.locked}
                 onChange={(e) => updateWindow({ locked: e.target.checked })}
               />
-              위치/편집 잠금
+              {t("common.lock")}
             </label>
             <label className="check-pill">
               <input
@@ -588,7 +636,7 @@ export const SettingsDrawer: React.FC<Props> = ({
                 checked={envInfo?.autostart ?? false}
                 onChange={(e) => handleToggleAutostart(e.target.checked)}
               />
-              Windows 시작 시 실행
+              {t("settings.autostart")}
             </label>
           </div>
 
@@ -599,35 +647,36 @@ export const SettingsDrawer: React.FC<Props> = ({
               onClick={() =>
                 api
                   .openDataFolder()
-                  .catch((e) => setStatusMsg(`데이터 폴더 열기 실패: ${String(e)}`))
+                  .catch((e) => setStatusMsg(t("settings.openDataFailed", { error: String(e) })))
               }
             >
-              <FolderOpen size={14} /> 데이터 폴더 열기
+              <FolderOpen size={14} /> {t("settings.openData")}
             </button>
             {!envInfo?.isPortable && (
               <button type="button" className="btn-secondary" onClick={handleEnablePortable}>
-                포터블 모드 전환 (exe 옆 data/)
+                {t("settings.portableSwitch")}
               </button>
             )}
             <button type="button" className="btn-secondary" onClick={handleExportConfig}>
-              <Upload size={14} /> 설정 내보내기 (.json)
+              <Upload size={14} /> {t("settings.exportConfig")}
             </button>
             <button type="button" className="btn-secondary" onClick={handleImportConfig}>
-              <Download size={14} /> 설정 가져오기 (.json)
+              <Download size={14} /> {t("settings.importConfig")}
             </button>
             <button type="button" className="btn-secondary" onClick={handleImportLaunchers}>
-              <Download size={14} /> launchers.json 가져오기
+              <Download size={14} /> {t("settings.importLaunchers")}
             </button>
           </div>
 
           {envInfo && (
             <div className="hint-text" style={{ marginTop: 8 }}>
-              저장 경로: {envInfo.dataDir} {envInfo.isPortable ? "(포터블)" : ""}
+              {t("settings.dataPath", { path: envInfo.dataDir })}{" "}
+              {envInfo.isPortable ? t("settings.portableTag") : ""}
             </div>
           )}
 
           <div className="divider" />
-          <div className="section-title">GitHub 저장소 자동 업데이트</div>
+          <div className="section-title">{t("settings.update")}</div>
           <div className="inline-group" style={{ justifyContent: "space-between", flexWrap: "wrap" }}>
             <label className="check-pill">
               <input
@@ -635,7 +684,7 @@ export const SettingsDrawer: React.FC<Props> = ({
                 checked={config.autoCheckUpdate !== false}
                 onChange={(e) => onChange({ ...config, autoCheckUpdate: e.target.checked })}
               />
-              시작 시 새 릴리즈 자동 확인
+              {t("settings.autoCheck")}
             </label>
             <button
               type="button"
@@ -648,24 +697,30 @@ export const SettingsDrawer: React.FC<Props> = ({
                   onUpdateInfo(info);
                   setStatusMsg(
                     info.hasUpdate
-                      ? `새 버전 v${info.latestVersion} 사용 가능 (현재 v${info.currentVersion})`
-                      : `최신 버전입니다 (v${info.currentVersion})`
+                      ? t("settings.updateAvailable", {
+                          latest: info.latestVersion,
+                          current: info.currentVersion,
+                        })
+                      : t("settings.upToDate", { current: info.currentVersion })
                   );
                 } catch (e) {
-                  setStatusMsg(`업데이트 확인 실패: ${String(e)}`);
+                  setStatusMsg(t("settings.checkFailed", { error: String(e) }));
                 } finally {
                   setCheckingUpdate(false);
                 }
               }}
             >
-              <RefreshCw size={13} /> {checkingUpdate ? "확인 중..." : "지금 확인"}
+              <RefreshCw size={13} /> {t(checkingUpdate ? "settings.checking" : "settings.checkNow")}
             </button>
           </div>
           {updateInfo?.hasUpdate && (
             <div className="update-box">
               <div className="inline-group" style={{ justifyContent: "space-between" }}>
                 <strong>
-                  새 릴리즈: v{updateInfo.latestVersion} (현재 v{updateInfo.currentVersion})
+                  {t("settings.newRelease", {
+                    latest: updateInfo.latestVersion,
+                    current: updateInfo.currentVersion,
+                  })}
                 </strong>
                 {updateInfo.downloadUrl ? (
                   <button
@@ -674,16 +729,16 @@ export const SettingsDrawer: React.FC<Props> = ({
                     disabled={updating}
                     onClick={async () => {
                       setUpdating(true);
-                      setStatusMsg("새 버전 다운로드 및 교체 중... 잠시 후 자동 재시작됩니다.");
+                      setStatusMsg(t("settings.updating"));
                       try {
                         await api.applyUpdate(updateInfo.downloadUrl!);
                       } catch (e) {
                         setUpdating(false);
-                        setStatusMsg(`업데이트 실패: ${String(e)}`);
+                        setStatusMsg(t("settings.updateFailed", { error: String(e) }));
                       }
                     }}
                   >
-                    {updating ? "적용 중..." : "자동 업데이트 & 재시작"}
+                    {t(updating ? "settings.applying" : "settings.autoUpdate")}
                   </button>
                 ) : (
                   <button
@@ -693,7 +748,7 @@ export const SettingsDrawer: React.FC<Props> = ({
                       api.executeAction({ type: "url", url: updateInfo.releaseUrl }).catch(() => {})
                     }
                   >
-                    릴리즈 페이지 열기
+                    {t("settings.openRelease")}
                   </button>
                 )}
               </div>
@@ -707,7 +762,7 @@ export const SettingsDrawer: React.FC<Props> = ({
         <div className="modal-footer">
           <span />
           <button type="button" className="btn-primary" onClick={onClose}>
-            완료
+            {t("common.done")}
           </button>
         </div>
       </div>

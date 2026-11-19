@@ -1,3 +1,4 @@
+use crate::i18n::{self, detail, t, Text};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -185,6 +186,8 @@ pub struct DeckConfig {
     pub discord: DiscordConfig,
     #[serde(default = "default_true")]
     pub auto_check_update: bool,
+    #[serde(default)]
+    pub language: Option<String>, // "ko" | "en" | "ja"; None = follow Windows
 }
 
 impl Default for DeckConfig {
@@ -194,7 +197,7 @@ impl Default for DeckConfig {
             "0".to_string(),
             ButtonItem {
                 id: "btn-vol-down".into(),
-                label: "볼륨 -".into(),
+                label: t(Text::LabelVolumeDown).into(),
                 show_label: true,
                 font_size: 13,
                 text_color: "#FFFFFF".into(),
@@ -214,7 +217,7 @@ impl Default for DeckConfig {
             "1".to_string(),
             ButtonItem {
                 id: "btn-vol-mute".into(),
-                label: "음소거".into(),
+                label: t(Text::LabelMute).into(),
                 show_label: true,
                 font_size: 13,
                 text_color: "#FFFFFF".into(),
@@ -234,7 +237,7 @@ impl Default for DeckConfig {
             "2".to_string(),
             ButtonItem {
                 id: "btn-vol-up".into(),
-                label: "볼륨 +".into(),
+                label: t(Text::LabelVolumeUp).into(),
                 show_label: true,
                 font_size: 13,
                 text_color: "#FFFFFF".into(),
@@ -254,7 +257,7 @@ impl Default for DeckConfig {
             "3".to_string(),
             ButtonItem {
                 id: "btn-mic-mute".into(),
-                label: "마이크".into(),
+                label: t(Text::LabelMic).into(),
                 show_label: true,
                 font_size: 13,
                 text_color: "#FFFFFF".into(),
@@ -274,7 +277,7 @@ impl Default for DeckConfig {
             "4".to_string(),
             ButtonItem {
                 id: "btn-audio-dev".into(),
-                label: "출력 전환".into(),
+                label: t(Text::LabelSwitchOutput).into(),
                 show_label: true,
                 font_size: 13,
                 text_color: "#FFFFFF".into(),
@@ -290,7 +293,7 @@ impl Default for DeckConfig {
             "5".to_string(),
             ButtonItem {
                 id: "btn-media-prev".into(),
-                label: "이전 곡".into(),
+                label: t(Text::LabelPrevTrack).into(),
                 show_label: true,
                 font_size: 13,
                 text_color: "#FFFFFF".into(),
@@ -308,7 +311,7 @@ impl Default for DeckConfig {
             "6".to_string(),
             ButtonItem {
                 id: "btn-media-play".into(),
-                label: "재생/정지".into(),
+                label: t(Text::LabelPlayPause).into(),
                 show_label: true,
                 font_size: 13,
                 text_color: "#FFFFFF".into(),
@@ -326,7 +329,7 @@ impl Default for DeckConfig {
             "7".to_string(),
             ButtonItem {
                 id: "btn-media-next".into(),
-                label: "다음 곡".into(),
+                label: t(Text::LabelNextTrack).into(),
                 show_label: true,
                 font_size: 13,
                 text_color: "#FFFFFF".into(),
@@ -344,7 +347,7 @@ impl Default for DeckConfig {
             "8".to_string(),
             ButtonItem {
                 id: "btn-widget-sys".into(),
-                label: "시스템".into(),
+                label: t(Text::LabelSystem).into(),
                 show_label: true,
                 font_size: 13,
                 text_color: "#FFFFFF".into(),
@@ -363,7 +366,7 @@ impl Default for DeckConfig {
             "9".to_string(),
             ButtonItem {
                 id: "btn-widget-clock".into(),
-                label: "시계".into(),
+                label: t(Text::LabelClock).into(),
                 show_label: true,
                 font_size: 13,
                 text_color: "#FFFFFF".into(),
@@ -413,18 +416,19 @@ impl Default for DeckConfig {
             pages: vec![
                 DeckPage {
                     id: "page-1".into(),
-                    name: "메인".into(),
+                    name: t(Text::PageMain).into(),
                     slots: HashMap::new(),
                 },
                 DeckPage {
                     id: "page-2".into(),
-                    name: "미디어".into(),
+                    name: t(Text::PageMedia).into(),
                     slots: page2_slots,
                 },
             ],
             vault: Vec::new(),
             discord: DiscordConfig::default(),
             auto_check_update: true,
+            language: None,
         }
     }
 }
@@ -466,6 +470,9 @@ fn sanitize_config(mut cfg: DeckConfig) -> DeckConfig {
     } else if cfg.pages[0].id.trim().is_empty() {
         cfg.pages[0].id = "page-1".into();
     }
+    cfg.language = cfg
+        .language
+        .filter(|code| i18n::Lang::from_code(code).is_some());
     cfg
 }
 
@@ -529,7 +536,7 @@ fn load_or_recover_config_in(dir: &Path) -> Result<(DeckConfig, Option<String>),
             Err(e) => {
                 tries += 1;
                 if tries >= 3 {
-                    return Err(format!("설정 파일을 읽을 수 없습니다: {e}"));
+                    return Err(detail(Text::ConfigReadFailed, e));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
@@ -538,18 +545,11 @@ fn load_or_recover_config_in(dir: &Path) -> Result<(DeckConfig, Option<String>),
     match serde_json::from_slice::<DeckConfig>(&bytes) {
         Ok(cfg) => Ok((sanitize_config(cfg), None)),
         Err(_) => {
-            let bak_path = write_config_backup(dir, "corrupt", &bytes).map_err(|e| {
-                format!("설정 파일이 손상되었지만 백업을 만들지 못해 초기화하지 않았습니다: {e}")
-            })?;
+            let bak_path = write_config_backup(dir, "corrupt", &bytes)
+                .map_err(|e| detail(Text::ConfigCorruptBackupFailed, e))?;
             let def = DeckConfig::default();
             save_config_to_dir(dir, &def)?;
-            Ok((
-                def,
-                Some(format!(
-                    "설정 파일이 손상되어 기본값으로 초기화했습니다. 기존 파일은 {} 에 백업했습니다. 복구하려면 앱을 종료한 뒤 그 파일을 고쳐 config.json으로 되돌리세요.",
-                    bak_path.display()
-                )),
-            ))
+            Ok((def, Some(i18n::config_reset_notice(&bak_path))))
         }
     }
 }
@@ -581,7 +581,9 @@ fn merge_ui_discord(merged: &mut DeckConfig, disk: &DeckConfig) {
 
 pub fn load_config() -> Result<DeckConfig, String> {
     let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    load_config_unlocked()
+    let cfg = load_config_unlocked()?;
+    i18n::set_current(cfg.language.as_deref());
+    Ok(cfg)
 }
 
 // Raw save without the UI merge; currently has no caller (imports go through
@@ -599,7 +601,9 @@ pub fn save_config_from_ui(cfg: &DeckConfig) -> Result<(), String> {
     // would drop the stored Discord tokens.
     let disk = load_config_unlocked()?;
     merge_ui_discord(&mut merged, &disk);
-    save_config_unlocked(&merged)
+    save_config_unlocked(&merged)?;
+    i18n::set_current(merged.language.as_deref());
+    Ok(())
 }
 
 pub fn update_discord_config<F: FnOnce(&mut DiscordConfig)>(f: F) -> Result<DiscordConfig, String> {
@@ -640,7 +644,7 @@ fn import_config_in<F: FnOnce(DeckConfig) -> DeckConfig>(
     }
     let current = fs::read(dir.join("config.json")).map_err(|e| e.to_string())?;
     write_config_backup(dir, "before-import", &current)
-        .map_err(|e| format!("가져오기 전 설정 백업에 실패해 가져오기를 취소했습니다: {e}"))?;
+        .map_err(|e| detail(Text::ImportBackupFailed, e))?;
     save_config_to_dir(dir, &next)?;
     Ok(next)
 }
@@ -653,13 +657,15 @@ pub fn import_config_with_backup<F: FnOnce(DeckConfig) -> DeckConfig>(
 ) -> Result<DeckConfig, String> {
     let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let disk = load_config_unlocked()?;
-    import_config_in(&get_data_dir()?, disk, f)
+    let next = import_config_in(&get_data_dir()?, disk, f)?;
+    i18n::set_current(next.language.as_deref());
+    Ok(next)
 }
 
 pub fn copy_image_to_assets(source_path: &str, prefix: &str) -> Result<String, String> {
     let src = Path::new(source_path);
     if !src.exists() {
-        return Err(format!("파일이 존재하지 않습니다: {source_path}"));
+        return Err(detail(Text::FileDoesNotExist, source_path));
     }
     let ext = src
         .extension()
@@ -723,6 +729,25 @@ mod tests {
         assert_eq!(ui.discord.access_token, "acc");
         assert_eq!(ui.discord.refresh_token, "ref");
         assert_eq!(ui.discord.client_id, "cid");
+    }
+
+    #[test]
+    fn language_is_optional_and_sanitized_to_supported_codes() {
+        let mut json = serde_json::to_value(DeckConfig::default()).unwrap();
+        assert!(json["language"].is_null());
+
+        // A config written before the field existed keeps loading.
+        json.as_object_mut().unwrap().remove("language");
+        let old: DeckConfig = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(old.language, None);
+
+        json["language"] = "ja".into();
+        let ja: DeckConfig = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(sanitize_config(ja).language.as_deref(), Some("ja"));
+
+        json["language"] = "fr".into();
+        let other: DeckConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(sanitize_config(other).language, None);
     }
 
     fn test_dir(name: &str) -> PathBuf {

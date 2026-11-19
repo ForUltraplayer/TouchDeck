@@ -1,4 +1,5 @@
 use crate::config::ButtonAction;
+use crate::i18n::{self, Text};
 use crate::win_com::ComGuard;
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -530,13 +531,13 @@ fn shell_open(target: &str, args: &str, work_dir: &str) -> Result<(), String> {
             Ok(())
         } else {
             let reason = match code {
-                2 => "파일을 찾을 수 없음",
-                3 => "경로를 찾을 수 없음",
-                5 => "액세스 거부",
-                31 => "연결된 프로그램 없음",
-                _ => "실행 실패",
+                2 => Text::LaunchFileNotFound,
+                3 => Text::LaunchPathNotFound,
+                5 => Text::LaunchAccessDenied,
+                31 => Text::LaunchNoAssociation,
+                _ => Text::LaunchFailed,
             };
-            Err(format!("{} ({}, 코드 {})", target, reason, code))
+            Err(i18n::launch_failed(target, reason, code))
         }
     }
 }
