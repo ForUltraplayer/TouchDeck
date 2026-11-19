@@ -93,6 +93,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
     initialItem ? structuredClone(initialItem) : DEFAULT_NEW_ITEM()
   );
   const [busy, setBusy] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
   const [recordingKey, setRecordingKey] = useState(false);
   const [audioDevices, setAudioDevices] = useState<AudioDeviceInfo[]>([]);
   const [transferPageIdx, setTransferPageIdx] = useState(currentPageIndex);
@@ -176,13 +177,13 @@ export const ButtonEditorModal: React.FC<Props> = ({
   };
 
   const handleBrowseApp = async () => {
-    const selected = await openDialog({
-      multiple: false,
-      filters: [{ name: "실행 파일 / 바로가기", extensions: ["lnk", "exe", "cmd", "bat", "vbs", "url"] }],
-    });
-    if (!selected || typeof selected !== "string") return;
-    setBusy(true);
     try {
+      const selected = await openDialog({
+        multiple: false,
+        filters: [{ name: "실행 파일 / 바로가기", extensions: ["lnk", "exe", "cmd", "bat", "vbs", "url"] }],
+      });
+      if (!selected || typeof selected !== "string") return;
+      setBusy(true);
       const resolved = await api.inspectDrop(selected);
       if (resolved.kind === "url") {
         setItem((prev) => ({
@@ -213,16 +214,19 @@ export const ButtonEditorModal: React.FC<Props> = ({
           },
         }));
       }
+      setErrorMsg("");
+    } catch (e) {
+      setErrorMsg(`파일 정보를 읽지 못했습니다: ${String(e)}`);
     } finally {
       setBusy(false);
     }
   };
 
   const handleBrowseFolder = async () => {
-    const selected = await openDialog({ directory: true, multiple: false });
-    if (!selected || typeof selected !== "string") return;
-    setBusy(true);
     try {
+      const selected = await openDialog({ directory: true, multiple: false });
+      if (!selected || typeof selected !== "string") return;
+      setBusy(true);
       const resolved = await api.inspectDrop(selected);
       setItem((prev) => ({
         ...prev,
@@ -230,6 +234,9 @@ export const ButtonEditorModal: React.FC<Props> = ({
         iconPath: resolved.iconPath ?? prev.iconPath,
         action: { type: "folder", path: selected },
       }));
+      setErrorMsg("");
+    } catch (e) {
+      setErrorMsg(`폴더 정보를 읽지 못했습니다: ${String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -249,15 +256,18 @@ export const ButtonEditorModal: React.FC<Props> = ({
   };
 
   const handleBrowseIcon = async () => {
-    const selected = await openDialog({
-      multiple: false,
-      filters: [{ name: "이미지", extensions: ["png", "jpg", "jpeg", "webp", "ico", "svg"] }],
-    });
-    if (!selected || typeof selected !== "string") return;
-    setBusy(true);
     try {
+      const selected = await openDialog({
+        multiple: false,
+        filters: [{ name: "이미지", extensions: ["png", "jpg", "jpeg", "webp", "ico", "svg"] }],
+      });
+      if (!selected || typeof selected !== "string") return;
+      setBusy(true);
       const rel = await api.importImage(selected, "icon");
       setItem((prev) => ({ ...prev, iconPath: rel }));
+      setErrorMsg("");
+    } catch (e) {
+      setErrorMsg(`아이콘 이미지를 가져오지 못했습니다: ${String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -526,7 +536,7 @@ export const ButtonEditorModal: React.FC<Props> = ({
                         action: {
                           type: "volume",
                           command: (item.action as Extract<ButtonAction, { type: "volume" }>).command,
-                          step: Number(e.target.value) || 5,
+                          step: Math.min(25, Math.max(1, Math.round(Number(e.target.value)) || 5)),
                           target: "speaker",
                         },
                       })
@@ -728,7 +738,10 @@ export const ButtonEditorModal: React.FC<Props> = ({
                       value={st.delayMs}
                       onChange={(e) => {
                         const cur = [...(item.action as Extract<ButtonAction, { type: "multi" }>).steps];
-                        cur[sIdx] = { ...cur[sIdx], delayMs: Number(e.target.value) || 0 };
+                        cur[sIdx] = {
+                          ...cur[sIdx],
+                          delayMs: Math.min(10000, Math.max(0, Math.round(Number(e.target.value)) || 0)),
+                        };
                         setItem({ ...item, action: { type: "multi", steps: cur } });
                       }}
                       title="다음 스텝까지 대기(ms)"
@@ -930,7 +943,14 @@ export const ButtonEditorModal: React.FC<Props> = ({
                 min={9}
                 max={28}
                 value={item.fontSize}
-                onChange={(e) => setItem({ ...item, fontSize: Number(e.target.value) || 13 })}
+                onChange={(e) =>
+                  setItem({
+                    ...item,
+                    // Lower bound waits for blur so two-digit sizes can still be typed
+                    fontSize: Math.min(28, Math.max(1, Math.round(Number(e.target.value)) || 13)),
+                  })
+                }
+                onBlur={() => setItem((prev) => ({ ...prev, fontSize: Math.max(9, prev.fontSize) }))}
               />
             </div>
             <div>
@@ -1019,6 +1039,8 @@ export const ButtonEditorModal: React.FC<Props> = ({
               </div>
             </>
           )}
+
+          {errorMsg && <div className="status-banner">{errorMsg}</div>}
         </div>
 
         <div className="modal-footer">

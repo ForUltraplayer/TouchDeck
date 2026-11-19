@@ -16,6 +16,7 @@ import type {
 export const api = {
   getConfig: () => invoke<DeckConfig>("get_config"),
   saveConfig: (config: DeckConfig) => invoke<void>("save_config_cmd", { config }),
+  takeConfigNotice: () => invoke<string | null>("take_config_notice"),
   getEnvInfo: () => invoke<EnvInfo>("get_env_info"),
   inspectDrop: (path: string) => invoke<ResolvedDrop>("inspect_drop", { path }),
   fetchFavicon: (url: string) => invoke<string>("fetch_favicon", { url }),

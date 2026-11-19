@@ -26,7 +26,7 @@ interface LayoutSnapshot {
 interface UseDeckWindowLayoutParams {
   config: DeckConfig | null;
   configRef: React.MutableRefObject<DeckConfig | null>;
-  setConfig: React.Dispatch<React.SetStateAction<DeckConfig | null>>;
+  persistConfig: (next: DeckConfig) => void;
   dockOpen: boolean;
   settingsOpen: boolean;
   editingSlot: number | null;
@@ -55,7 +55,7 @@ function afterTwoFrames(fn: () => void) {
 export function useDeckWindowLayout({
   config,
   configRef,
-  setConfig,
+  persistConfig,
   dockOpen,
   settingsOpen,
   editingSlot,
@@ -417,12 +417,10 @@ export function useDeckWindowLayout({
         const anchorX = payload.x + activeDockPhysWRef.current;
         const anchorY = payload.y;
         homePosRef.current = { x: anchorX, y: anchorY };
-        const next: DeckConfig = {
+        persistConfig({
           ...latest,
           window: { ...latest.window, x: anchorX, y: anchorY },
-        };
-        setConfig(next);
-        api.saveConfig(next).catch(() => {});
+        });
       }, 300);
     });
     return () => {
@@ -431,7 +429,7 @@ export function useDeckWindowLayout({
       stopMonitorRecovery();
       unlistenPromise.then((fn) => fn());
     };
-  }, [configRef, setConfig, stopMonitorRecovery]);
+  }, [configRef, persistConfig, stopMonitorRecovery]);
 
   const renderedModal: ModalSnapshot | null =
     editingSlot !== null

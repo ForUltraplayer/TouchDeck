@@ -82,8 +82,15 @@ export const App: React.FC = () => {
   const suppressClickUntilRef = useRef(0);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragNoActivateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveInFlightRef = useRef(false);
+  const saveDirtyRef = useRef(false);
   const userHiddenRef = useRef(false);
+  const pollNowRef = useRef(() => {});
   const statsInFlightRef = useRef(false);
+  const volPollInFlightRef = useRef(false);
+  const runningInFlightRef = useRef(false);
+  const mediaInFlightRef = useRef(false);
+  const requestedAssetsRef = useRef(new Set<string>());
   const wantNoActivateRef = useRef(true);
   const slotDragPendingRef = useRef<{
     fromSlot: number;
@@ -105,10 +112,43 @@ export const App: React.FC = () => {
   const pageIndexRef = useRef(pageIndex);
   pageIndexRef.current = pageIndex;
 
-  const showToast = useCallback((msg: string) => {
+  const showToast = useCallback((msg: string, durationMs = 2400) => {
     setToast(msg);
-    setTimeout(() => setToast((cur) => (cur === msg ? null : cur)), 2400);
+    setTimeout(() => setToast((cur) => (cur === msg ? null : cur)), durationMs);
   }, []);
+
+  // Single save path: one request at a time, always writing the latest config
+  const flushSave = useCallback(async () => {
+    const latest = configRef.current;
+    if (saveInFlightRef.current || !saveDirtyRef.current || !latest) return;
+    saveDirtyRef.current = false;
+    saveInFlightRef.current = true;
+    try {
+      await api.saveConfig(latest);
+    } catch (e) {
+      showToast(`저장 실패: ${String(e)}`);
+    } finally {
+      saveInFlightRef.current = false;
+      // Changed while saving and no debounce timer left to pick it up
+      if (saveDirtyRef.current && !saveTimerRef.current) {
+        void flushSave();
+      }
+    }
+  }, [showToast]);
+
+  const persistConfig = useCallback(
+    (next: DeckConfig) => {
+      configRef.current = next;
+      setConfig(next);
+      saveDirtyRef.current = true;
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = setTimeout(() => {
+        saveTimerRef.current = null;
+        void flushSave();
+      }, 220);
+    },
+    [flushSave]
+  );
 
   const {
     dockMounted,
@@ -122,7 +162,7 @@ export const App: React.FC = () => {
   } = useDeckWindowLayout({
     config,
     configRef,
-    setConfig,
+    persistConfig,
     dockOpen,
     settingsOpen,
     editingSlot,
@@ -138,7 +178,14 @@ export const App: React.FC = () => {
     setLoadError(null);
     syncHomeFromConfig(loaded);
     setConfig(loaded);
-  }, [syncHomeFromConfig]);
+    api
+      .takeConfigNotice()
+      .then((notice) => {
+        // Long enough to read the backup path
+        if (notice) showToast(notice, 20000);
+      })
+      .catch(() => {});
+  }, [syncHomeFromConfig, showToast]);
 
   // Initial config and Discord state load
   useEffect(() => {
@@ -172,9 +219,11 @@ export const App: React.FC = () => {
     const u1 = listen("open-settings", () => {
       userHiddenRef.current = false;
       setSettingsOpen(true);
+      pollNowRef.current();
     });
     const u2 = listen("tray-show", () => {
       userHiddenRef.current = false;
+      pollNowRef.current();
     });
     const u3 = listen("tray-hide", () => {
       userHiddenRef.current = true;
@@ -197,6 +246,8 @@ export const App: React.FC = () => {
   // Poll live status (volume, running processes, SMTC, CPU/RAM, clock)
   useEffect(() => {
     const poll = () => {
+      // Nothing to refresh while the window sits hidden in the tray
+      if (userHiddenRef.current || document.hidden) return;
       const cur = configRef.current;
       if (!cur) return;
       const page = cur.pages[pageIndexRef.current] ?? cur.pages[0];
@@ -229,7 +280,8 @@ export const App: React.FC = () => {
 
       const uniqProcs = procs.length > 1 ? Array.from(new Set(procs)) : procs;
 
-      if (needVol) {
+      if (needVol && !volPollInFlightRef.current) {
+        volPollInFlightRef.current = true;
         api
           .getVolumeState()
           .then((next) =>
@@ -242,9 +294,13 @@ export const App: React.FC = () => {
                 : next
             )
           )
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => {
+            volPollInFlightRef.current = false;
+          });
       }
-      if (uniqProcs.length > 0) {
+      if (uniqProcs.length > 0 && !runningInFlightRef.current) {
+        runningInFlightRef.current = true;
         api
           .getRunningStatus(uniqProcs)
           .then((next) =>
@@ -257,9 +313,13 @@ export const App: React.FC = () => {
                 : next
             )
           )
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => {
+            runningInFlightRef.current = false;
+          });
       }
-      if (needMedia) {
+      if (needMedia && !mediaInFlightRef.current) {
+        mediaInFlightRef.current = true;
         api
           .getNowPlaying()
           .then((next) =>
@@ -277,7 +337,10 @@ export const App: React.FC = () => {
               return next;
             })
           )
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => {
+            mediaInFlightRef.current = false;
+          });
       }
       if (needStats && !statsInFlightRef.current) {
         statsInFlightRef.current = true;
@@ -309,9 +372,14 @@ export const App: React.FC = () => {
       );
     };
 
+    pollNowRef.current = poll;
     poll();
     const timer = setInterval(poll, 2500);
-    return () => clearInterval(timer);
+    document.addEventListener("visibilitychange", poll);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", poll);
+    };
   }, [pageIndex, config?.pages]);
 
   // Win+D defense handled natively on a Rust background thread (zero JS IPC polling)
@@ -353,8 +421,10 @@ export const App: React.FC = () => {
     for (const v of config.vault ?? []) {
       if (v.iconPath) rels.add(v.iconPath);
     }
-    const missing = Array.from(rels).filter((r) => !(r in assetMap));
+    // Each path is requested once, so a failed resolve is never retried in a loop
+    const missing = Array.from(rels).filter((r) => !requestedAssetsRef.current.has(r));
     if (missing.length === 0) return;
+    missing.forEach((r) => requestedAssetsRef.current.add(r));
 
     Promise.all(
       missing.map(async (rel) => {
@@ -366,32 +436,18 @@ export const App: React.FC = () => {
         }
       })
     ).then((pairs) => {
-      setAssetMap((prev) => {
-        const next = { ...prev };
-        for (const [k, v] of pairs) {
-          if (v) next[k] = v;
-        }
-        return next;
-      });
+      const resolved = pairs.filter(([, abs]) => abs);
+      if (resolved.length > 0) {
+        setAssetMap((prev) => ({ ...prev, ...Object.fromEntries(resolved) }));
+      }
     });
-  }, [config, assetMap]);
+  }, [config]);
 
   // Sync alwaysOnTop changes
   useEffect(() => {
     if (!config) return;
     getCurrentWindow().setAlwaysOnTop(config.window.alwaysOnTop).catch(() => {});
   }, [config?.window.alwaysOnTop]);
-
-  const persistConfig = useCallback(
-    (next: DeckConfig) => {
-      setConfig(next);
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = setTimeout(() => {
-        api.saveConfig(next).catch((e) => showToast(`저장 실패: ${String(e)}`));
-      }, 220);
-    },
-    [showToast]
-  );
 
   // Find slot index under CSS client position
   const findSlotAtClientPos = useCallback((cx: number, cy: number): number | null => {
@@ -461,10 +517,9 @@ export const App: React.FC = () => {
                 const rel = await api.importImage(droppedPath, "icon");
                 iconUpdates.push({ slot: targetSlot, iconPath: rel });
                 showToast(`아이콘 이미지 변경: ${curPageAfter.slots[String(targetSlot)].label}`);
-              } else {
+              } else if (!bgRel) {
                 bgRel = await api.importImage(droppedPath, "bg");
                 showToast("배경 이미지 테마가 적용되었습니다.");
-                break;
               }
               continue;
             }
@@ -504,27 +559,26 @@ export const App: React.FC = () => {
 
         const cur = configRef.current;
         if (!cur) return;
-        if (bgRel) {
-          const curStyle = cur.theme.buttonStyle ?? "solid";
-          persistConfig({
-            ...cur,
-            theme: {
+        const curStyle = cur.theme.buttonStyle ?? "solid";
+        const nextTheme: DeckConfig["theme"] = bgRel
+          ? {
               ...cur.theme,
               backgroundType: "image",
               backgroundImage: bgRel,
               buttonStyle: curStyle === "solid" ? "glass" : curStyle,
               backgroundBlur: cur.theme.backgroundBlur === 8 ? 2 : cur.theme.backgroundBlur,
               backgroundDim: cur.theme.backgroundDim === 35 ? 20 : cur.theme.backgroundDim,
-            },
-          });
-          return;
-        }
-        if (iconUpdates.length === 0 && addedEntries.length === 0) return;
+            }
+          : cur.theme;
 
         const curPage = cur.pages[dropPageIdx];
-        if (!curPage) return;
+        if (!curPage || (iconUpdates.length === 0 && addedEntries.length === 0)) {
+          if (bgRel) persistConfig({ ...cur, theme: nextTheme });
+          return;
+        }
         const totalSlots = cur.grid.columns * cur.grid.rows;
         const nextSlots = { ...curPage.slots };
+        let nextVault = cur.vault ?? [];
 
         for (const upd of iconUpdates) {
           if (nextSlots[String(upd.slot)]) {
@@ -548,13 +602,19 @@ export const App: React.FC = () => {
             showToast("현재 페이지에 빈 칸이 없습니다.");
             break;
           }
+          // A drop onto an occupied tile moves the old button to the vault
+          const displaced = nextSlots[String(slotToUse)];
+          if (displaced) {
+            nextVault = [...nextVault, displaced];
+            showToast(`"${entry.item.label}" 배치됨 (기존 "${displaced.label}" 보관함 이동)`);
+          }
           nextSlots[String(slotToUse)] = entry.item;
         }
 
         const nextPages = cur.pages.map((p, idx) =>
           idx === dropPageIdx ? { ...p, slots: nextSlots } : p
         );
-        persistConfig({ ...cur, pages: nextPages });
+        persistConfig({ ...cur, theme: nextTheme, pages: nextPages, vault: nextVault });
       }
     });
 

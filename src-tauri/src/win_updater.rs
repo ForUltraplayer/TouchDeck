@@ -209,7 +209,22 @@ pub fn check_for_update() -> Result<UpdateInfo, String> {
     })
 }
 
+// The download URL arrives over IPC, so accept only assets of this repository's releases.
+// GitHub treats owner/repo case-insensitively; dot segments could leave the repository path.
+fn is_release_asset_url(url: &str) -> bool {
+    let prefix = format!("https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download/");
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with(&prefix.to_ascii_lowercase())
+        && !lower.contains("..")
+        && !lower.contains("%2e")
+        && !lower.contains('\\')
+}
+
 pub fn download_and_apply_update(app: &AppHandle, download_url: &str) -> Result<(), String> {
+    if !is_release_asset_url(download_url) {
+        return Err("허용되지 않은 다운로드 주소입니다. 릴리즈 페이지에서 직접 다운로드해 주세요.".into());
+    }
+
     let cur_exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let cur_dir = cur_exe
         .parent()
@@ -297,5 +312,36 @@ mod tests {
             pick_portable_exe_asset(&release).as_deref(),
             Some("https://example.com/portable.exe")
         );
+    }
+
+    #[test]
+    fn is_release_asset_url_accepts_only_this_repo_release_downloads() {
+        let base = format!("https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download");
+        assert!(is_release_asset_url(&format!(
+            "{base}/v0.2.7/TouchDeck-v0.2.7-windows-x64.exe"
+        )));
+        assert!(is_release_asset_url(
+            &format!("{base}/v0.2.7/TouchDeck.exe").to_ascii_lowercase()
+        ));
+
+        let insecure = format!("{base}/v0.2.7/TouchDeck.exe").replacen("https://", "http://", 1);
+        assert!(!is_release_asset_url(&insecure));
+        assert!(!is_release_asset_url(&format!(
+            "https://github.com/{REPO_OWNER}/Other/releases/download/v1/TouchDeck.exe"
+        )));
+        assert!(!is_release_asset_url(&format!(
+            "https://github.com.evil.tld/{REPO_OWNER}/{REPO_NAME}/releases/download/v1/TouchDeck.exe"
+        )));
+        assert!(!is_release_asset_url(&format!(
+            "https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/tag/v0.2.7"
+        )));
+        assert!(!is_release_asset_url(&format!(
+            "{base}/../../../../evil/repo/releases/download/v1/x.exe"
+        )));
+        assert!(!is_release_asset_url(&format!(
+            "{base}/%2E%2e/%2e%2e/x.exe"
+        )));
+        assert!(!is_release_asset_url("https://example.com/portable.exe"));
+        assert!(!is_release_asset_url(""));
     }
 }

@@ -1,10 +1,11 @@
 use crate::config::ButtonAction;
 use crate::win_com::ComGuard;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::Path;
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 use windows::core::{Interface, HSTRING, PCWSTR, VARIANT};
@@ -22,11 +23,38 @@ use windows::Win32::UI::Shell::{IShellWindows, IWebBrowser2, ShellExecuteW, Shel
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, BringWindowToTop, EnumWindows, FlashWindowEx, GetClassNameW,
     GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-    SetForegroundWindow, SetWindowPos, ShowWindow, SwitchToThisWindow, ASFW_ANY, FLASHWINFO,
-    FLASHW_STOP, GWL_EXSTYLE, GW_OWNER, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_SHOWWINDOW, SW_HIDE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, WS_EX_TOOLWINDOW,
+    GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow,
+    IsWindowVisible, SetForegroundWindow, SetWindowPos, ShowWindowAsync, SwitchToThisWindow,
+    ASFW_ANY, FLASHWINFO, FLASHW_STOP, GWL_EXSTYLE, GW_OWNER, HWND_NOTOPMOST, HWND_TOPMOST,
+    SWP_ASYNCWINDOWPOS, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_MINIMIZE, SW_RESTORE,
+    SW_SHOW, SW_SHOWNORMAL, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
 };
+
+// Launches that are still starting up, keyed by action. A repeat tap while the
+// key is present is ignored so a cold start is not launched twice.
+static IN_FLIGHT: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+// Holds an IN_FLIGHT key and releases it on drop.
+struct InFlightGuard(String);
+
+impl InFlightGuard {
+    fn acquire(key: String) -> Option<Self> {
+        IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.clone())
+            .then(|| InFlightGuard(key))
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -362,12 +390,17 @@ pub fn force_foreground(hwnd: HWND) -> bool {
         if hwnd.0.is_null() || !IsWindow(hwnd).as_bool() {
             return false;
         }
+        // The calls below are synchronous against the target; a hung target would
+        // block this thread while it is attached to another thread's input queue.
+        if IsHungAppWindow(hwnd).as_bool() {
+            return false;
+        }
 
         if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
+            let _ = ShowWindowAsync(hwnd, SW_RESTORE);
             thread::sleep(Duration::from_millis(40));
         } else if !IsWindowVisible(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_SHOW);
+            let _ = ShowWindowAsync(hwnd, SW_SHOW);
         }
 
         let _ = AllowSetForegroundWindow(ASFW_ANY);
@@ -380,15 +413,17 @@ pub fn force_foreground(hwnd: HWND) -> bool {
         };
         let target_thread = GetWindowThreadProcessId(hwnd, None);
 
-        let attached_fg =
-            fg_thread != 0 && fg_thread != cur_thread && AttachThreadInput(cur_thread, fg_thread, true).as_bool();
+        let attached_fg = fg_thread != 0
+            && fg_thread != cur_thread
+            && !IsHungAppWindow(fg).as_bool()
+            && AttachThreadInput(cur_thread, fg_thread, true).as_bool();
         let attached_target = target_thread != 0
             && target_thread != cur_thread
             && target_thread != fg_thread
             && AttachThreadInput(cur_thread, target_thread, true).as_bool();
 
         let _ = BringWindowToTop(hwnd);
-        let _ = ShowWindow(
+        let _ = ShowWindowAsync(
             hwnd,
             if IsIconic(hwnd).as_bool() {
                 SW_RESTORE
@@ -414,24 +449,28 @@ pub fn force_foreground(hwnd: HWND) -> bool {
         if GetForegroundWindow() != hwnd {
             send_alt_tap();
             let _ = AllowSetForegroundWindow(ASFW_ANY);
-            let _ = SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
-            );
-            let _ = SetWindowPos(
-                hwnd,
-                HWND_NOTOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
-            );
+            // Skip the z-order bounce for a window that is already always-on-top;
+            // ending on NOTOPMOST would strip that state.
+            if (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0) == 0 {
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS,
+                );
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_NOTOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS,
+                );
+            }
             let _ = BringWindowToTop(hwnd);
             let _ = SetForegroundWindow(hwnd);
         }
@@ -449,7 +488,7 @@ pub fn force_foreground(hwnd: HWND) -> bool {
     }
 }
 
-fn shell_open(target: &str, args: &str, work_dir: &str) {
+fn shell_open(target: &str, args: &str, work_dir: &str) -> Result<(), String> {
     unsafe {
         let _ = AllowSetForegroundWindow(ASFW_ANY);
         let show = if target.to_ascii_lowercase().ends_with(".cmd")
@@ -461,13 +500,10 @@ fn shell_open(target: &str, args: &str, work_dir: &str) {
         };
         let op = HSTRING::from("open");
         let file = HSTRING::from(target);
-        let params = if args.is_empty() {
-            PCWSTR::null()
-        } else {
-            PCWSTR(HSTRING::from(args).as_ptr())
-        };
         let wd_hstr;
-        let dir = if !work_dir.is_empty() {
+        // A work dir that does not exist makes ShellExecuteW fail, so fall back
+        // to the target's parent in that case too.
+        let dir = if !work_dir.is_empty() && Path::new(work_dir).is_dir() {
             wd_hstr = HSTRING::from(work_dir);
             PCWSTR(wd_hstr.as_ptr())
         } else if let Some(parent) = Path::new(target).parent() {
@@ -487,9 +523,21 @@ fn shell_open(target: &str, args: &str, work_dir: &str) {
         } else {
             PCWSTR(_args_keep.as_ptr())
         };
-        let _ = params;
 
-        ShellExecuteW(None, &op, &file, params_ptr, dir, show);
+        // ShellExecuteW succeeds when the returned value is greater than 32.
+        let code = ShellExecuteW(None, &op, &file, params_ptr, dir, show).0 as isize;
+        if code > 32 {
+            Ok(())
+        } else {
+            let reason = match code {
+                2 => "파일을 찾을 수 없음",
+                3 => "경로를 찾을 수 없음",
+                5 => "액세스 거부",
+                31 => "연결된 프로그램 없음",
+                _ => "실행 실패",
+            };
+            Err(format!("{} ({}, 코드 {})", target, reason, code))
+        }
     }
 }
 
@@ -591,9 +639,12 @@ fn handle_chrome(exe: &str, args: &str, work_dir: &str) {
         } else {
             0
         };
-        let attached = fg_t != 0 && fg_t != cur && AttachThreadInput(cur, fg_t, true).as_bool();
+        let attached = fg_t != 0
+            && fg_t != cur
+            && !IsHungAppWindow(fg).as_bool()
+            && AttachThreadInput(cur, fg_t, true).as_bool();
         let _ = AllowSetForegroundWindow(ASFW_ANY);
-        shell_open(exe, args, work_dir);
+        let _ = shell_open(exe, args, work_dir);
         if attached {
             let _ = AttachThreadInput(cur, fg_t, false);
         }
@@ -657,15 +708,22 @@ pub fn execute_launch_action(action: &ButtonAction) -> Result<(), String> {
             } else {
                 proc_name.clone()
             };
+            let flight_key = format!("app|{}|{}", resolved_exe.to_lowercase(), args);
 
             // Chrome multi-profile handling
             if effective_proc.eq_ignore_ascii_case("chrome")
                 && args.to_ascii_lowercase().contains("--profile-directory")
             {
+                let Some(guard) = InFlightGuard::acquire(flight_key) else {
+                    return Ok(());
+                };
                 let exe_clone = resolved_exe;
                 let args_clone = args.clone();
                 let wd_clone = resolved_wd;
-                thread::spawn(move || handle_chrome(&exe_clone, &args_clone, &wd_clone));
+                thread::spawn(move || {
+                    let _guard = guard;
+                    handle_chrome(&exe_clone, &args_clone, &wd_clone);
+                });
                 return Ok(());
             }
 
@@ -676,7 +734,7 @@ pub fn execute_launch_action(action: &ButtonAction) -> Result<(), String> {
                 thread::spawn(move || unsafe {
                     let target = HWND(hwnd_raw as *mut _);
                     if do_toggle && GetForegroundWindow() == target && !IsIconic(target).as_bool() {
-                        let _ = ShowWindow(target, SW_MINIMIZE);
+                        let _ = ShowWindowAsync(target, SW_MINIMIZE);
                     } else {
                         force_foreground(target);
                     }
@@ -684,11 +742,14 @@ pub fn execute_launch_action(action: &ButtonAction) -> Result<(), String> {
                 return Ok(());
             }
 
+            let Some(guard) = InFlightGuard::acquire(flight_key) else {
+                return Ok(());
+            };
+            shell_open(&resolved_exe, args, &resolved_wd)?;
             let ch = class_hint.clone();
             let th = title_hint.clone();
-            let args_clone = args.clone();
             thread::spawn(move || {
-                shell_open(&resolved_exe, &args_clone, &resolved_wd);
+                let _guard = guard;
                 if !effective_proc.is_empty() {
                     wait_and_focus_process(&effective_proc, &ch, &th, 8000);
                 }
@@ -697,14 +758,20 @@ pub fn execute_launch_action(action: &ButtonAction) -> Result<(), String> {
         }
         ButtonAction::Folder { path } => {
             let folder = expand_env_vars(path);
+            let Some(guard) =
+                InFlightGuard::acquire(format!("folder|{}", normalize_folder(&folder)))
+            else {
+                return Ok(());
+            };
             thread::spawn(move || {
+                let _guard = guard;
                 let (matched, before_hwnds) = find_explorer_for_folder(&folder);
                 if let Some(hwnd) = matched {
                     force_foreground(hwnd);
                     return;
                 }
                 let quoted = format!("\"{}\"", folder);
-                shell_open("explorer.exe", &quoted, "");
+                let _ = shell_open("explorer.exe", &quoted, "");
 
                 let start = Instant::now();
                 while start.elapsed().as_millis() < 4000 {
@@ -725,15 +792,18 @@ pub fn execute_launch_action(action: &ButtonAction) -> Result<(), String> {
             Ok(())
         }
         ButtonAction::Url { url } => {
-            let u = url.clone();
+            let Some(guard) = InFlightGuard::acquire(format!("url|{}", url)) else {
+                return Ok(());
+            };
+            let fg_before = unsafe { GetForegroundWindow() }.0 as isize;
+            shell_open(url, "", "")?;
             thread::spawn(move || {
-                let fg_before = unsafe { GetForegroundWindow() };
-                shell_open(&u, "", "");
+                let _guard = guard;
                 let start = Instant::now();
                 while start.elapsed().as_millis() < 1500 {
                     thread::sleep(Duration::from_millis(70));
                     let cur_fg = unsafe { GetForegroundWindow() };
-                    if !cur_fg.0.is_null() && cur_fg != fg_before {
+                    if !cur_fg.0.is_null() && cur_fg.0 as isize != fg_before {
                         if unsafe { IsIconic(cur_fg).as_bool() } {
                             force_foreground(cur_fg);
                         }
@@ -744,5 +814,43 @@ pub fn execute_launch_action(action: &ButtonAction) -> Result<(), String> {
             Ok(())
         }
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // IN_FLIGHT is process-wide and tests run in parallel, so each test uses its own key.
+
+    #[test]
+    fn in_flight_guard_rejects_duplicate_until_dropped() {
+        let key = "test|duplicate".to_string();
+        let first = InFlightGuard::acquire(key.clone());
+        assert!(first.is_some());
+        assert!(InFlightGuard::acquire(key.clone()).is_none());
+        // A rejected acquire must not release the key held by the first guard.
+        assert!(InFlightGuard::acquire(key.clone()).is_none());
+        drop(first);
+        assert!(InFlightGuard::acquire(key).is_some());
+    }
+
+    #[test]
+    fn in_flight_guard_keys_are_independent() {
+        let a = InFlightGuard::acquire("test|independent|a".to_string());
+        let b = InFlightGuard::acquire("test|independent|b".to_string());
+        assert!(a.is_some());
+        assert!(b.is_some());
+    }
+
+    #[test]
+    fn in_flight_guard_released_when_owning_thread_finishes() {
+        let key = "test|thread".to_string();
+        let guard = InFlightGuard::acquire(key.clone()).unwrap();
+        let worker = thread::spawn(move || {
+            let _guard = guard;
+        });
+        worker.join().unwrap();
+        assert!(InFlightGuard::acquire(key).is_some());
     }
 }

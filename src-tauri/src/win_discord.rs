@@ -1,10 +1,10 @@
-use crate::config::{load_config, DiscordConfig};
+use crate::config::{read_discord_config, DiscordConfig};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::windows::io::AsRawHandle;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -106,20 +106,36 @@ fn write_frame(pipe: &mut File, opcode: u32, payload: &Value) -> Result<(), Stri
     pipe.flush().map_err(|e| e.to_string())
 }
 
-fn pipe_bytes_available(pipe: &File) -> Result<u32, String> {
+const MAX_FRAME_LEN: usize = 4 * 1024 * 1024;
+const PIPE_DRAIN_THRESHOLD: usize = 32 * 1024;
+
+// True once a whole frame (8-byte header + payload) is buffered, so read_frame cannot block.
+// The header is peeked without being consumed.
+fn pipe_frame_ready(pipe: &File) -> Result<bool, String> {
+    let mut hdr = [0u8; 8];
+    let mut peeked: u32 = 0;
     let mut avail: u32 = 0;
     unsafe {
         PeekNamedPipe(
             HANDLE(pipe.as_raw_handle() as *mut _),
-            None,
-            0,
-            None,
+            Some(hdr.as_mut_ptr() as *mut _),
+            hdr.len() as u32,
+            Some(&mut peeked),
             Some(&mut avail),
             None,
         )
         .map_err(|e| e.to_string())?;
     }
-    Ok(avail)
+    if peeked < 8 {
+        return Ok(false);
+    }
+    let len = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as usize;
+    if len > MAX_FRAME_LEN {
+        return Err("Discord IPC frame too large".into());
+    }
+    // A frame larger than the pipe buffer never becomes fully available: the writer waits for
+    // us to drain it. A full buffer means the rest is already on its way, so reading is safe.
+    Ok(avail as usize >= 8 + len || avail as usize >= PIPE_DRAIN_THRESHOLD)
 }
 
 fn read_frame(pipe: &mut File) -> Result<(u32, Value), String> {
@@ -127,7 +143,7 @@ fn read_frame(pipe: &mut File) -> Result<(u32, Value), String> {
     pipe.read_exact(&mut hdr).map_err(|e| e.to_string())?;
     let opcode = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
     let len = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as usize;
-    if len > 4 * 1024 * 1024 {
+    if len > MAX_FRAME_LEN {
         return Err("Discord IPC frame too large".into());
     }
     let mut data = vec![0u8; len];
@@ -280,10 +296,11 @@ fn refresh_oauth(client_id: &str, client_secret: &str, refresh_token: &str) -> R
     Ok((access, refresh))
 }
 
-fn save_discord_cfg(app: &AppHandle, dc: DiscordConfig) {
-    if let Ok(saved) = crate::config::update_discord_config(|cur| *cur = dc) {
-        let _ = app.emit("discord-config-updated", &saved);
-    }
+// Applies `f` to the stored Discord section in place and announces the saved value.
+fn save_discord_cfg<F: FnOnce(&mut DiscordConfig)>(app: &AppHandle, f: F) -> Result<(), String> {
+    let saved = crate::config::update_discord_config(f)?;
+    let _ = app.emit("discord-config-updated", &saved);
+    Ok(())
 }
 
 fn next_nonce() -> String {
@@ -301,27 +318,42 @@ fn run_worker(app: AppHandle, state_lock: Arc<Mutex<DiscordState>>, rx: Receiver
     let mut tried_refresh = false;
 
     loop {
-        // Process outbound commands
-        while let Ok(cmd) = rx.try_recv() {
+        // Process outbound commands. Without a pipe there is nothing to poll, so block on the
+        // channel until the next connect attempt instead of spinning.
+        let first = if pipe.is_some() {
+            match rx.try_recv() {
+                Ok(cmd) => Some(cmd),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => return,
+            }
+        } else {
+            match rx.recv_timeout(Duration::from_secs(4).saturating_sub(last_connect_try.elapsed())) {
+                Ok(cmd) => Some(cmd),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        };
+        for cmd in first.into_iter().chain(rx.try_iter()) {
             match cmd {
                 DiscordCommand::Authorize {
                     client_id,
                     client_secret,
                 } => {
-                    let mut dc = load_config().map(|c| c.discord).unwrap_or_default();
-                    dc.client_id = client_id.trim().to_string();
-                    dc.client_secret = client_secret.trim().to_string();
-                    dc.access_token.clear();
-                    dc.refresh_token.clear();
-                    save_discord_cfg(&app, dc);
+                    let saved = save_discord_cfg(&app, |cur| {
+                        cur.client_id = client_id.trim().to_string();
+                        cur.client_secret = client_secret.trim().to_string();
+                        cur.access_token.clear();
+                        cur.refresh_token.clear();
+                    });
                     pipe = None;
-                    pending_auth = true;
+                    // Without the saved client id there is nothing to authorize with.
+                    pending_auth = saved.is_ok();
                     tried_refresh = false;
                     last_connect_try = Instant::now() - Duration::from_secs(10);
                     update_state(&app, &state_lock, |s| {
                         s.authenticated = false;
                         s.pipe_connected = false;
-                        s.last_error = None;
+                        s.last_error = saved.err();
                     });
                 }
                 DiscordCommand::Reconnect => {
@@ -331,10 +363,11 @@ fn run_worker(app: AppHandle, state_lock: Arc<Mutex<DiscordState>>, rx: Receiver
                 }
                 DiscordCommand::Disconnect => {
                     pipe = None;
-                    let mut dc = load_config().map(|c| c.discord).unwrap_or_default();
-                    dc.access_token.clear();
-                    dc.refresh_token.clear();
-                    save_discord_cfg(&app, dc);
+                    tried_refresh = false;
+                    let _ = save_discord_cfg(&app, |cur| {
+                        cur.access_token.clear();
+                        cur.refresh_token.clear();
+                    });
                     update_state(&app, &state_lock, |s| {
                         *s = DiscordState::default();
                     });
@@ -386,7 +419,7 @@ fn run_worker(app: AppHandle, state_lock: Arc<Mutex<DiscordState>>, rx: Receiver
         // Try connect if needed and client_id exists
         if pipe.is_none() && last_connect_try.elapsed() >= Duration::from_secs(4) {
             last_connect_try = Instant::now();
-            let dc = load_config().map(|c| c.discord).unwrap_or_default();
+            let dc = read_discord_config().unwrap_or_default();
             if !dc.client_id.is_empty() && (!dc.access_token.is_empty() || pending_auth) {
                 if let Some(mut p) = open_discord_pipe() {
                     if write_frame(&mut p, 0, &json!({ "v": 1, "client_id": dc.client_id })).is_ok()
@@ -409,8 +442,8 @@ fn run_worker(app: AppHandle, state_lock: Arc<Mutex<DiscordState>>, rx: Receiver
         // Poll incoming frames
         let mut drop_pipe = false;
         if let Some(p) = pipe.as_mut() {
-            match pipe_bytes_available(p) {
-                Ok(avail) if avail >= 8 => match read_frame(p) {
+            match pipe_frame_ready(p) {
+                Ok(true) => match read_frame(p) {
                     Ok((opcode, val)) => {
                         if opcode == 2 {
                             drop_pipe = true;
@@ -419,7 +452,7 @@ fn run_worker(app: AppHandle, state_lock: Arc<Mutex<DiscordState>>, rx: Receiver
                             let evt_name = val.get("evt").and_then(|v| v.as_str()).unwrap_or("");
 
                             if evt_name == "READY" {
-                                let dc = load_config().map(|c| c.discord).unwrap_or_default();
+                                let dc = read_discord_config().unwrap_or_default();
                                 if !dc.access_token.is_empty() {
                                     let _ = write_frame(
                                         p,
@@ -454,14 +487,15 @@ fn run_worker(app: AppHandle, state_lock: Arc<Mutex<DiscordState>>, rx: Receiver
 
                                 if cmd_name == "AUTHENTICATE" && !tried_refresh {
                                     tried_refresh = true;
-                                    let mut dc = load_config().map(|c| c.discord).unwrap_or_default();
+                                    let dc = read_discord_config().unwrap_or_default();
                                     if !dc.refresh_token.is_empty() && !dc.client_secret.is_empty() {
                                         if let Ok((acc, ref_t)) =
                                             refresh_oauth(&dc.client_id, &dc.client_secret, &dc.refresh_token)
                                         {
-                                            dc.access_token = acc.clone();
-                                            dc.refresh_token = ref_t;
-                                            save_discord_cfg(&app, dc);
+                                            let _ = save_discord_cfg(&app, |cur| {
+                                                cur.access_token = acc.clone();
+                                                cur.refresh_token = ref_t;
+                                            });
                                             let _ = write_frame(
                                                 p,
                                                 1,
@@ -482,12 +516,13 @@ fn run_worker(app: AppHandle, state_lock: Arc<Mutex<DiscordState>>, rx: Receiver
                                 });
                             } else if cmd_name == "AUTHORIZE" {
                                 if let Some(code) = val.pointer("/data/code").and_then(|v| v.as_str()) {
-                                    let mut dc = load_config().map(|c| c.discord).unwrap_or_default();
+                                    let dc = read_discord_config().unwrap_or_default();
                                     match exchange_code(&dc.client_id, &dc.client_secret, code) {
                                         Ok((acc, ref_t)) => {
-                                            dc.access_token = acc.clone();
-                                            dc.refresh_token = ref_t;
-                                            save_discord_cfg(&app, dc);
+                                            let _ = save_discord_cfg(&app, |cur| {
+                                                cur.access_token = acc.clone();
+                                                cur.refresh_token = ref_t;
+                                            });
                                             let _ = write_frame(
                                                 p,
                                                 1,
@@ -506,6 +541,7 @@ fn run_worker(app: AppHandle, state_lock: Arc<Mutex<DiscordState>>, rx: Receiver
                                     }
                                 }
                             } else if cmd_name == "AUTHENTICATE" {
+                                tried_refresh = false;
                                 update_state(&app, &state_lock, |s| {
                                     s.authenticated = true;
                                     s.last_error = None;
@@ -575,6 +611,8 @@ fn run_worker(app: AppHandle, state_lock: Arc<Mutex<DiscordState>>, rx: Receiver
         }
 
         if drop_pipe {
+            // tried_refresh is not reset here: if Discord closes the pipe after a failed
+            // AUTHENTICATE, resetting would retry the OAuth refresh on every reconnect.
             pipe = None;
             update_state(&app, &state_lock, |s| {
                 s.pipe_connected = false;
@@ -582,6 +620,8 @@ fn run_worker(app: AppHandle, state_lock: Arc<Mutex<DiscordState>>, rx: Receiver
             });
         }
 
-        thread::sleep(Duration::from_millis(50));
+        if pipe.is_some() {
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 }

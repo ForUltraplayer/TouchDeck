@@ -1,10 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 static CONFIG_LOCK: Mutex<()> = Mutex::new(());
+// User-facing message left by a config reset, handed to the UI once.
+static CONFIG_NOTICE: Mutex<Option<String>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -468,31 +471,85 @@ fn sanitize_config(mut cfg: DeckConfig) -> DeckConfig {
 
 fn save_config_to_dir(dir: &Path, cfg: &DeckConfig) -> Result<(), String> {
     let cfg_path = dir.join("config.json");
-    let tmp_path = dir.join("config.json.tmp");
+    // Per-process temp name so two processes never write into the same temp file.
+    let tmp_path = dir.join(format!("config.json.{}.tmp", std::process::id()));
     let json = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    fs::write(&tmp_path, json).map_err(|e| e.to_string())?;
-    fs::rename(&tmp_path, &cfg_path).map_err(|e| e.to_string())?;
-    Ok(())
+    let written = fs::File::create(&tmp_path)
+        .and_then(|mut f| {
+            f.write_all(json.as_bytes())?;
+            f.sync_all()
+        })
+        .and_then(|_| fs::rename(&tmp_path, &cfg_path));
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    written.map_err(|e| e.to_string())
 }
 
-fn load_or_recover_config_in(dir: &Path) -> Result<DeckConfig, String> {
-    let cfg_path = dir.join("config.json");
-    if !cfg_path.exists() {
-        let def = DeckConfig::default();
-        save_config_to_dir(dir, &def)?;
-        return Ok(def);
+// Writes `bytes` next to config.json as `config.json.<tag>-<unix_secs>`; an
+// existing backup is never overwritten (same-second names get a numeric suffix).
+fn write_config_backup(dir: &Path, tag: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut n = 0u32;
+    loop {
+        let path = dir.join(if n == 0 {
+            format!("config.json.{tag}-{secs}")
+        } else {
+            format!("config.json.{tag}-{secs}-{n}")
+        });
+        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                f.write_all(bytes)
+                    .and_then(|_| f.sync_all())
+                    .map_err(|e| e.to_string())?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => n += 1,
+            Err(e) => return Err(e.to_string()),
+        }
     }
-    match fs::read_to_string(&cfg_path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<DeckConfig>(&text).ok())
-    {
-        Some(cfg) => Ok(sanitize_config(cfg)),
-        None => {
-            let bak_path = dir.join("config.json.bak");
-            let _ = fs::copy(&cfg_path, &bak_path);
+}
+
+// Returns the config plus a user-facing notice when a corrupt file was reset.
+// A read failure on an existing file is an error and never overwrites it.
+fn load_or_recover_config_in(dir: &Path) -> Result<(DeckConfig, Option<String>), String> {
+    let cfg_path = dir.join("config.json");
+    let mut tries = 0;
+    let bytes = loop {
+        match fs::read(&cfg_path) {
+            Ok(bytes) => break bytes,
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                let def = DeckConfig::default();
+                save_config_to_dir(dir, &def)?;
+                return Ok((def, None));
+            }
+            Err(e) => {
+                tries += 1;
+                if tries >= 3 {
+                    return Err(format!("설정 파일을 읽을 수 없습니다: {e}"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    };
+    match serde_json::from_slice::<DeckConfig>(&bytes) {
+        Ok(cfg) => Ok((sanitize_config(cfg), None)),
+        Err(_) => {
+            let bak_path = write_config_backup(dir, "corrupt", &bytes).map_err(|e| {
+                format!("설정 파일이 손상되었지만 백업을 만들지 못해 초기화하지 않았습니다: {e}")
+            })?;
             let def = DeckConfig::default();
             save_config_to_dir(dir, &def)?;
-            Ok(def)
+            Ok((
+                def,
+                Some(format!(
+                    "설정 파일이 손상되어 기본값으로 초기화했습니다. 기존 파일은 {} 에 백업했습니다. 복구하려면 앱을 종료한 뒤 그 파일을 고쳐 config.json으로 되돌리세요.",
+                    bak_path.display()
+                )),
+            ))
         }
     }
 }
@@ -504,7 +561,11 @@ fn save_config_unlocked(cfg: &DeckConfig) -> Result<(), String> {
 
 fn load_config_unlocked() -> Result<DeckConfig, String> {
     let dir = get_data_dir()?;
-    load_or_recover_config_in(&dir)
+    let (cfg, notice) = load_or_recover_config_in(&dir)?;
+    if let Some(notice) = notice {
+        *CONFIG_NOTICE.lock().unwrap_or_else(|e| e.into_inner()) = Some(notice);
+    }
+    Ok(cfg)
 }
 
 fn merge_ui_discord(merged: &mut DeckConfig, disk: &DeckConfig) {
@@ -523,6 +584,9 @@ pub fn load_config() -> Result<DeckConfig, String> {
     load_config_unlocked()
 }
 
+// Raw save without the UI merge; currently has no caller (imports go through
+// `import_config_with_backup`, the UI through `save_config_from_ui`).
+#[allow(dead_code)]
 pub fn save_config(cfg: &DeckConfig) -> Result<(), String> {
     let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     save_config_unlocked(cfg)
@@ -531,9 +595,10 @@ pub fn save_config(cfg: &DeckConfig) -> Result<(), String> {
 pub fn save_config_from_ui(cfg: &DeckConfig) -> Result<(), String> {
     let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut merged = sanitize_config(cfg.clone());
-    if let Ok(disk) = load_config_unlocked() {
-        merge_ui_discord(&mut merged, &disk);
-    }
+    // An unreadable disk config aborts the save: writing without the merge
+    // would drop the stored Discord tokens.
+    let disk = load_config_unlocked()?;
+    merge_ui_discord(&mut merged, &disk);
     save_config_unlocked(&merged)
 }
 
@@ -543,6 +608,52 @@ pub fn update_discord_config<F: FnOnce(&mut DiscordConfig)>(f: F) -> Result<Disc
     f(&mut cfg.discord);
     save_config_unlocked(&cfg)?;
     Ok(cfg.discord)
+}
+
+/// Read-only view of the stored Discord section for polling callers. Never
+/// recovers, rewrites or backs up config.json; any failure yields `None`.
+pub fn read_discord_config() -> Option<DiscordConfig> {
+    let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let bytes = fs::read(get_data_dir().ok()?.join("config.json")).ok()?;
+    serde_json::from_slice::<DeckConfig>(&bytes)
+        .ok()
+        .map(|cfg| cfg.discord)
+}
+
+/// Returns the pending config-reset notice, if any, and clears it.
+pub fn take_config_notice() -> Option<String> {
+    CONFIG_NOTICE.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+fn import_config_in<F: FnOnce(DeckConfig) -> DeckConfig>(
+    dir: &Path,
+    disk: DeckConfig,
+    f: F,
+) -> Result<DeckConfig, String> {
+    let mut next = sanitize_config(f(disk.clone()));
+    // An import without tokens (e.g. an exported file) keeps the stored Discord auth.
+    if next.discord.access_token.is_empty()
+        && next.discord.refresh_token.is_empty()
+        && !disk.discord.client_id.is_empty()
+    {
+        next.discord = disk.discord;
+    }
+    let current = fs::read(dir.join("config.json")).map_err(|e| e.to_string())?;
+    write_config_backup(dir, "before-import", &current)
+        .map_err(|e| format!("가져오기 전 설정 백업에 실패해 가져오기를 취소했습니다: {e}"))?;
+    save_config_to_dir(dir, &next)?;
+    Ok(next)
+}
+
+/// Replaces the stored config with `f(current)`. The current config.json is
+/// first copied to `config.json.before-import-<unix_secs>`; if that backup
+/// cannot be written nothing is replaced.
+pub fn import_config_with_backup<F: FnOnce(DeckConfig) -> DeckConfig>(
+    f: F,
+) -> Result<DeckConfig, String> {
+    let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let disk = load_config_unlocked()?;
+    import_config_in(&get_data_dir()?, disk, f)
 }
 
 pub fn copy_image_to_assets(source_path: &str, prefix: &str) -> Result<String, String> {
@@ -614,21 +725,127 @@ mod tests {
         assert_eq!(ui.discord.client_id, "cid");
     }
 
-    #[test]
-    fn load_or_recover_backs_up_corrupted_json_and_returns_default() {
+    fn test_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "touchdeck_cfg_test_{}",
+            "touchdeck_cfg_test_{name}_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
         fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn backups_in(dir: &Path, tag: &str) -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&format!("config.json.{tag}-")))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn load_or_recover_backs_up_corrupted_json_and_returns_default() {
+        let dir = test_dir("corrupt");
         fs::write(dir.join("config.json"), "{not valid json").unwrap();
 
-        let loaded = load_or_recover_config_in(&dir).unwrap();
+        let (loaded, notice) = load_or_recover_config_in(&dir).unwrap();
         assert!(!loaded.pages.is_empty());
-        assert_eq!(fs::read_to_string(dir.join("config.json.bak")).unwrap(), "{not valid json");
+        let backups = backups_in(&dir, "corrupt");
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read_to_string(&backups[0]).unwrap(), "{not valid json");
+        let backup_name = backups[0].file_name().unwrap().to_str().unwrap();
+        assert!(notice.unwrap().contains(backup_name));
+        assert!(serde_json::from_slice::<DeckConfig>(&fs::read(dir.join("config.json")).unwrap()).is_ok());
+
+        // A second reset in the same second must not overwrite the first backup.
+        fs::write(dir.join("config.json"), "second corruption").unwrap();
+        load_or_recover_config_in(&dir).unwrap();
+        assert_eq!(backups_in(&dir, "corrupt").len(), 2);
+        assert_eq!(fs::read_to_string(&backups[0]).unwrap(), "{not valid json");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_or_recover_leaves_valid_and_absent_config_without_backup_or_notice() {
+        let dir = test_dir("valid");
+        let (created, notice) = load_or_recover_config_in(&dir).unwrap();
+        assert!(notice.is_none());
+        assert!(dir.join("config.json").exists());
+
+        let mut cfg = created;
+        cfg.pages[0].name = "kept".into();
+        save_config_to_dir(&dir, &cfg).unwrap();
+        let (loaded, notice) = load_or_recover_config_in(&dir).unwrap();
+        assert!(notice.is_none());
+        assert_eq!(loaded.pages[0].name, "kept");
+        assert!(backups_in(&dir, "corrupt").is_empty());
+        // The atomic save leaves no temp file behind.
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_or_recover_errors_without_writing_when_config_is_locked() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = test_dir("locked");
+        let cfg_path = dir.join("config.json");
+        fs::write(&cfg_path, "{not valid json").unwrap();
+        // Deny reads but share write + delete, so an overwrite attempt would succeed
+        // and the assertions below would catch it.
+        let deny_read = || {
+            fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0x2 | 0x4)
+                .open(&cfg_path)
+                .unwrap()
+        };
+
+        let lock = deny_read();
+        assert!(load_or_recover_config_in(&dir).is_err());
+        drop(lock);
+        assert_eq!(fs::read_to_string(&cfg_path).unwrap(), "{not valid json");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+
+        // The same lock does not stop a replace, so the check above is meaningful.
+        let lock = deny_read();
+        assert!(fs::read(&cfg_path).is_err());
+        fs::write(dir.join("probe"), "probe").unwrap();
+        assert!(fs::rename(dir.join("probe"), &cfg_path).is_ok());
+        drop(lock);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_backs_up_current_config_and_keeps_disk_discord() {
+        let dir = test_dir("import");
+        let mut disk = DeckConfig::default();
+        disk.discord.client_id = "cid".into();
+        disk.discord.client_secret = "csec".into();
+        disk.discord.access_token = "acc".into();
+        save_config_to_dir(&dir, &disk).unwrap();
+        let before = fs::read(dir.join("config.json")).unwrap();
+
+        let mut imported = DeckConfig::default();
+        imported.grid.columns = 99;
+        imported.discord.client_id = "cid".into();
+        let saved = import_config_in(&dir, disk, |_| imported).unwrap();
+
+        assert_eq!(saved.grid.columns, 10);
+        assert_eq!(saved.discord.client_secret, "csec");
+        assert_eq!(saved.discord.access_token, "acc");
+        let backups = backups_in(&dir, "before-import");
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read(&backups[0]).unwrap(), before);
+        let (reloaded, _) = load_or_recover_config_in(&dir).unwrap();
+        assert_eq!(reloaded.discord.access_token, "acc");
         let _ = fs::remove_dir_all(&dir);
     }
 }

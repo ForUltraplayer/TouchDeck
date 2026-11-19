@@ -5,12 +5,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use windows::core::{w, BSTR, PCSTR, VARIANT};
-use windows::Win32::Foundation::{FILETIME, HMODULE};
+use windows::Win32::Foundation::{FILETIME, HANDLE, HMODULE};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoSetProxyBlanket, CLSCTX_INPROC_SERVER, EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL,
     RPC_C_IMP_LEVEL_IMPERSONATE,
 };
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::System::LibraryLoader::{
+    GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+};
 use windows::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
     PdhGetFormattedCounterValue, PdhOpenQueryW, PDH_FMT_COUNTERVALUE,
@@ -74,10 +76,21 @@ struct NvmlApi {
 }
 unsafe impl Send for NvmlApi {}
 
-static NVML_STATE: Mutex<Option<Option<NvmlApi>>> = Mutex::new(None);
+struct NvmlState {
+    api: Option<NvmlApi>,
+    failures: u32,
+    last_try: Option<Instant>,
+}
+
+static NVML_STATE: Mutex<NvmlState> = Mutex::new(NvmlState {
+    api: None,
+    failures: 0,
+    last_try: None,
+});
 
 unsafe fn load_nvml() -> Option<NvmlApi> {
-    let lib = LoadLibraryW(w!("nvml.dll")).ok()?;
+    // System32 only: a bare name would search the exe's own directory first.
+    let lib = LoadLibraryExW(w!("nvml.dll"), HANDLE::default(), LOAD_LIBRARY_SEARCH_SYSTEM32).ok()?;
     let init: unsafe extern "C" fn() -> i32 =
         std::mem::transmute(GetProcAddress(lib, PCSTR(b"nvmlInit_v2\0".as_ptr()))?);
     if init() != 0 {
@@ -140,10 +153,20 @@ fn read_nvml_stats(out: &mut SystemStats) -> bool {
     let Ok(mut guard) = NVML_STATE.lock() else {
         return false;
     };
-    if guard.is_none() {
-        *guard = Some(unsafe { load_nvml() });
+    // The driver may not be ready at login: retry at most every 30 s, give up after 5 failures.
+    if guard.api.is_none()
+        && guard.failures < 5
+        && guard
+            .last_try
+            .map_or(true, |t| t.elapsed() >= Duration::from_secs(30))
+    {
+        guard.last_try = Some(Instant::now());
+        guard.api = unsafe { load_nvml() };
+        if guard.api.is_none() {
+            guard.failures += 1;
+        }
     }
-    let Some(Some(api)) = guard.as_ref() else {
+    let Some(api) = guard.api.as_ref() else {
         return false;
     };
 
@@ -467,6 +490,14 @@ fn read_cached_cpu_temp() -> Option<i32> {
     {
         return cached_temp;
     }
+    // Clears the flag even if the WMI query panics, so later refreshes are not blocked.
+    struct RefreshGuard;
+    impl Drop for RefreshGuard {
+        fn drop(&mut self) {
+            TEMP_REFRESHING.store(false, Ordering::SeqCst);
+        }
+    }
+    let _refreshing = RefreshGuard;
 
     let t = query_wmi_cpu_temp();
     if let Ok(mut guard) = TEMP_CACHE.lock() {
@@ -475,7 +506,6 @@ fn read_cached_cpu_temp() -> Option<i32> {
             temp: t,
         });
     }
-    TEMP_REFRESHING.store(false, Ordering::SeqCst);
     t
 }
 

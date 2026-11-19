@@ -410,24 +410,28 @@ pub fn fetch_favicon_asset(raw_url: &str) -> Result<String, String> {
         return Err("유효한 도메인이 아닙니다.".into());
     }
 
+    let is_local_or_ip = host.eq_ignore_ascii_case("localhost")
+        || host.chars().all(|c| c.is_ascii_digit() || c == '.');
+    let port: u16 = authority
+        .split(':')
+        .nth(1)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(if trimmed.starts_with("https://") { 443 } else { 80 });
+
     let data_dir = get_data_dir()?;
     let mut hasher = DefaultHasher::new();
     host.to_ascii_lowercase().hash(&mut hasher);
+    // Local services differ by port, so each one gets its own cached icon.
+    if is_local_or_ip {
+        port.hash(&mut hasher);
+    }
     let rel_path = format!("assets/fav_{:016x}.png", hasher.finish());
     let dest = data_dir.join(&rel_path);
     if dest.exists() {
         return Ok(rel_path);
     }
 
-    let is_local_or_ip = host.eq_ignore_ascii_case("localhost")
-        || host.chars().all(|c| c.is_ascii_digit() || c == '.');
-
     let bytes = if is_local_or_ip {
-        let port: u16 = authority
-            .split(':')
-            .nth(1)
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(if trimmed.starts_with("https://") { 443 } else { 80 });
         http_get_bytes(host, port, "/favicon.ico", trimmed.starts_with("https://"))?
     } else {
         let q = format!("/s2/favicons?domain={host}&sz=128");

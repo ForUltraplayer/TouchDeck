@@ -1,5 +1,9 @@
 import React, { useEffect, useState } from "react";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import {
+  confirm as confirmDialog,
+  open as openDialog,
+  save as saveDialog,
+} from "@tauri-apps/plugin-dialog";
 import { Download, FolderOpen, Image as ImageIcon, Plus, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import { api } from "../api";
 import type { DeckConfig, DiscordState, EnvInfo, UpdateInfo } from "../types";
@@ -51,20 +55,24 @@ export const SettingsDrawer: React.FC<Props> = ({
   };
 
   const handlePickBgImage = async () => {
-    const selected = await openDialog({
-      multiple: false,
-      filters: [{ name: "배경 이미지", extensions: ["png", "jpg", "jpeg", "webp"] }],
-    });
-    if (!selected || typeof selected !== "string") return;
-    const rel = await api.importImage(selected, "bg");
-    const curStyle = config.theme.buttonStyle ?? "solid";
-    updateTheme({
-      backgroundType: "image",
-      backgroundImage: rel,
-      buttonStyle: curStyle === "solid" ? "glass" : curStyle,
-      backgroundBlur: config.theme.backgroundBlur === 8 ? 2 : config.theme.backgroundBlur,
-      backgroundDim: config.theme.backgroundDim === 35 ? 20 : config.theme.backgroundDim,
-    });
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        filters: [{ name: "배경 이미지", extensions: ["png", "jpg", "jpeg", "webp"] }],
+      });
+      if (!selected || typeof selected !== "string") return;
+      const rel = await api.importImage(selected, "bg");
+      const curStyle = config.theme.buttonStyle ?? "solid";
+      updateTheme({
+        backgroundType: "image",
+        backgroundImage: rel,
+        buttonStyle: curStyle === "solid" ? "glass" : curStyle,
+        backgroundBlur: config.theme.backgroundBlur === 8 ? 2 : config.theme.backgroundBlur,
+        backgroundDim: config.theme.backgroundDim === 35 ? 20 : config.theme.backgroundDim,
+      });
+    } catch (e) {
+      setStatusMsg(`배경 이미지 적용 실패: ${String(e)}`);
+    }
   };
 
   const handleAddPage = () => {
@@ -77,8 +85,20 @@ export const SettingsDrawer: React.FC<Props> = ({
     onSwitchPage(nextIdx);
   };
 
-  const handleDeletePage = (idx: number) => {
+  const handleDeletePage = async (idx: number) => {
     if (config.pages.length <= 1) return;
+    try {
+      const confirmed = await confirmDialog(
+        `"${config.pages[idx].name}" 페이지와 그 안의 버튼 ${
+          Object.keys(config.pages[idx].slots).length
+        }개를 삭제합니다. 삭제한 뒤에는 되돌릴 수 없습니다. 계속할까요?`,
+        { title: "페이지 삭제", kind: "warning" }
+      );
+      if (!confirmed) return;
+    } catch (e) {
+      setStatusMsg(`페이지 삭제 확인 실패: ${String(e)}`);
+      return;
+    }
     const remapPageAction = (item: DeckConfig["pages"][number]["slots"][string]) => {
       if (item.action.type !== "page") return item;
       const pi = item.action.pageIndex;
@@ -115,6 +135,11 @@ export const SettingsDrawer: React.FC<Props> = ({
     });
     if (!selected || typeof selected !== "string") return;
     try {
+      const confirmed = await confirmDialog(
+        "선택한 launchers.json의 버튼으로 1페이지의 버튼 전체를 교체합니다. 가져오기 전에 현재 설정을 백업 파일로 저장합니다. 계속할까요?",
+        { title: "launchers.json 가져오기", kind: "warning" }
+      );
+      if (!confirmed) return;
       const count = await api.importLaunchersJson(selected);
       setStatusMsg(`버튼 ${count}개를 불러왔습니다.`);
       onReloadFromDisk();
@@ -144,6 +169,11 @@ export const SettingsDrawer: React.FC<Props> = ({
     });
     if (!selected || typeof selected !== "string") return;
     try {
+      const confirmed = await confirmDialog(
+        "선택한 파일의 내용으로 현재 설정 전체(모든 페이지와 버튼, 보관함, 테마, 창 설정)를 교체합니다. 가져오기 전에 현재 설정을 백업 파일로 저장합니다. 계속할까요?",
+        { title: "설정 가져오기", kind: "warning" }
+      );
+      if (!confirmed) return;
       const restored = await api.importConfigFile(selected);
       if (currentPageIndex >= restored.pages.length) {
         onSwitchPage(0);
@@ -563,7 +593,15 @@ export const SettingsDrawer: React.FC<Props> = ({
           </div>
 
           <div className="inline-group" style={{ marginTop: 10, flexWrap: "wrap" }}>
-            <button type="button" className="btn-secondary" onClick={() => api.openDataFolder()}>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() =>
+                api
+                  .openDataFolder()
+                  .catch((e) => setStatusMsg(`데이터 폴더 열기 실패: ${String(e)}`))
+              }
+            >
               <FolderOpen size={14} /> 데이터 폴더 열기
             </button>
             {!envInfo?.isPortable && (

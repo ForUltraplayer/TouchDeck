@@ -9,8 +9,8 @@ mod win_updater;
 mod win_window;
 
 use config::{
-    copy_image_to_assets, get_data_dir, is_portable_mode, load_config, resolve_asset_path,
-    save_config, save_config_from_ui, ButtonAction, ButtonItem, DeckConfig,
+    copy_image_to_assets, get_data_dir, import_config_with_backup, is_portable_mode, load_config,
+    resolve_asset_path, save_config_from_ui, ButtonAction, ButtonItem, DeckConfig,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -41,23 +41,38 @@ struct ExecuteResult {
     message: Option<String>,
 }
 
+// Commands that touch files or COM are async + spawn_blocking: sync commands run
+// on the main thread, and a stall there can stall the Explorer-owned desktop window.
 #[tauri::command]
-fn get_config() -> Result<DeckConfig, String> {
-    load_config()
+async fn get_config() -> Result<DeckConfig, String> {
+    tauri::async_runtime::spawn_blocking(load_config)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn save_config_cmd(config: DeckConfig) -> Result<(), String> {
-    save_config_from_ui(&config)
+fn take_config_notice() -> Option<String> {
+    config::take_config_notice()
 }
 
 #[tauri::command]
-fn get_env_info() -> Result<EnvInfo, String> {
-    Ok(EnvInfo {
-        data_dir: get_data_dir()?.to_string_lossy().to_string(),
-        is_portable: is_portable_mode(),
-        autostart: win_window::is_autostart_enabled(),
+async fn save_config_cmd(config: DeckConfig) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || save_config_from_ui(&config))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_env_info() -> Result<EnvInfo, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        Ok(EnvInfo {
+            data_dir: get_data_dir()?.to_string_lossy().to_string(),
+            is_portable: is_portable_mode(),
+            autostart: win_window::is_autostart_enabled(),
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -83,8 +98,10 @@ async fn fetch_favicon(url: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn import_image(path: String, prefix: String) -> Result<String, String> {
-    copy_image_to_assets(&path, &prefix)
+async fn import_image(path: String, prefix: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || copy_image_to_assets(&path, &prefix))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -93,8 +110,10 @@ fn resolve_asset(rel_path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn extract_icon_for_path(path: String, is_folder: bool) -> Result<String, String> {
-    win_shell::extract_icon_asset(&path, is_folder)
+async fn extract_icon_for_path(path: String, is_folder: bool) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || win_shell::extract_icon_asset(&path, is_folder))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 fn execute_single_action(
@@ -346,8 +365,10 @@ fn tick_desktop_visibility(window: tauri::WebviewWindow, always_on_top: bool) ->
 }
 
 #[tauri::command]
-fn set_autostart_cmd(enabled: bool) -> Result<bool, String> {
-    win_window::set_autostart(enabled)
+async fn set_autostart_cmd(enabled: bool) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || win_window::set_autostart(enabled))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -359,7 +380,13 @@ fn open_data_folder() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn enable_portable_mode() -> Result<String, String> {
+async fn enable_portable_mode() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(enable_portable_mode_sync)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn enable_portable_mode_sync() -> Result<String, String> {
     let exe_path = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe_dir = exe_path
         .parent()
@@ -433,7 +460,6 @@ fn import_launchers_json_sync(path: &str) -> Result<usize, String> {
     let map: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&text).map_err(|e| e.to_string())?;
 
-    let mut cfg = load_config()?;
     let mut new_slots: HashMap<String, ButtonItem> = HashMap::new();
     let mut imported = 0usize;
 
@@ -492,44 +518,71 @@ fn import_launchers_json_sync(path: &str) -> Result<usize, String> {
         imported += 1;
     }
 
-    if cfg.pages.is_empty() {
-        cfg.pages.push(config::DeckPage {
-            id: "page-1".into(),
-            name: "메인".into(),
-            slots: new_slots,
-        });
-    } else {
-        cfg.pages[0].slots = new_slots;
-    }
-    save_config(&cfg)?;
+    // Page 1 is replaced as a whole; the previous config.json is backed up first.
+    import_config_with_backup(move |mut cfg| {
+        if cfg.pages.is_empty() {
+            cfg.pages.push(config::DeckPage {
+                id: "page-1".into(),
+                name: "메인".into(),
+                slots: new_slots,
+            });
+        } else {
+            cfg.pages[0].slots = new_slots;
+        }
+        cfg
+    })?;
     Ok(imported)
 }
 
 #[tauri::command]
-fn export_config_file(path: String, config: DeckConfig) -> Result<(), String> {
-    save_config(&config)?;
-    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())
+async fn export_config_file(path: String, config: DeckConfig) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // The export strips secrets, so it must never land on the live config.json.
+        let live = std::fs::canonicalize(get_data_dir()?.join("config.json")).ok();
+        if live.is_some() && std::fs::canonicalize(&path).ok() == live {
+            return Err("사용 중인 config.json에는 내보낼 수 없습니다. 다른 위치를 선택해 주세요.".into());
+        }
+        save_config_from_ui(&config)?;
+        // Exported files are meant to be shared or copied around: keep the
+        // Discord client id but never the secret or the tokens.
+        let mut exported = config;
+        exported.discord.client_secret.clear();
+        exported.discord.access_token.clear();
+        exported.discord.refresh_token.clear();
+        let json = serde_json::to_string_pretty(&exported).map_err(|e| e.to_string())?;
+        std::fs::write(&path, json).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn import_config_file(path: String) -> Result<DeckConfig, String> {
-    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut cfg: DeckConfig = serde_json::from_str(&text)
-        .map_err(|e| format!("올바른 TouchDeck 설정 JSON이 아닙니다: {e}"))?;
-    if cfg.pages.is_empty() {
-        return Err("페이지 데이터가 없는 설정 파일입니다.".into());
-    }
-    if cfg.pages[0].id.trim().is_empty() {
-        cfg.pages[0].id = "page-1".into();
-    }
-    save_config(&cfg)?;
-    Ok(cfg)
+async fn import_config_file(path: String) -> Result<DeckConfig, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let cfg: DeckConfig = serde_json::from_str(&text)
+            .map_err(|e| format!("올바른 TouchDeck 설정 JSON이 아닙니다: {e}"))?;
+        if cfg.pages.is_empty() {
+            return Err("페이지 데이터가 없는 설정 파일입니다.".into());
+        }
+        import_config_with_backup(move |_| cfg)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must stay the first plugin: a second launch hands over to the running
+        // instance here and exits before anything else touches config.json.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            win_window::set_user_hidden(false);
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.emit("tray-show", ());
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let bridge = DiscordBridge::start(app.handle().clone());
@@ -644,6 +697,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_config,
+            take_config_notice,
             save_config_cmd,
             get_env_info,
             inspect_drop,
