@@ -42,6 +42,21 @@ Windows 터치모니터 및 데스크톱 환경을 위한 **초경량 Stream Dec
 
 ---
 
+## 설치 및 제거
+
+[릴리즈 페이지](https://github.com/ForUltraplayer/TouchDeck/releases/latest)에서 받을 수 있습니다.
+
+| 파일 | 용도 |
+|---|---|
+| `TouchDeck-<버전>-windows-x64-setup.exe` | **설치 파일(권장)**. 사용자 폴더에 설치하고 시작 메뉴·바탕화면 바로가기를 만듭니다. |
+| `TouchDeck-<버전>-windows-x64-portable.zip` | 포터블판. 압축을 푼 폴더의 `data/`에 설정을 저장합니다. |
+| `TouchDeck-<버전>-windows-x64.exe` | 단일 실행 파일. 앱 내 자동 업데이트가 내려받는 파일이며, 직접 쓸 때는 이 파일이 프로그램 본체이므로 지우면 안 됩니다. |
+
+- **제거**: Windows 설정의 **앱 > 설치된 앱**(또는 제어판의 프로그램 제거)에서 TouchDeck을 제거합니다. 시작 프로그램 등록도 함께 지워집니다.
+- 버튼 설정과 아이콘은 `%APPDATA%\TouchDeck`에 남습니다. 완전히 지우려면 이 폴더를 직접 삭제합니다.
+
+---
+
 ## 기술 스택
 
 | 영역 | 기술 |
@@ -66,11 +81,12 @@ npm install
 npm run tauri dev
 ```
 
-### 단일 실행 파일 빌드 (포터블)
+### 설치 파일 및 단일 실행 파일 빌드
 ```bash
-npm run tauri build -- --no-bundle
+npm run tauri build
 ```
-빌드 완료 후 `src-tauri/target/release/touchdeck.exe`를 원하는 폴더에 두고 실행할 수 있습니다.  
+빌드 완료 후 설치 파일은 `src-tauri/target/release/bundle/nsis/`에, 단일 실행 파일은 `src-tauri/target/release/touchdeck.exe`에 생성됩니다(`-- --no-bundle`을 붙이면 실행 파일만 빌드).  
+실행 파일은 원하는 폴더에 두고 바로 실행할 수 있습니다.  
 같은 폴더에 `data/` 디렉토리를 만들거나 설정에서 **"포터블 모드 전환"**을 누르면 설정(`config.json`)과 아이콘(`assets/`)이 로컬에 저장됩니다.
 
 ---

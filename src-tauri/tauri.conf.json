@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "TouchDeck",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "identifier": "com.local.touchdeck",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -35,6 +35,13 @@
   "bundle": {
     "active": true,
     "targets": "nsis",
+    "publisher": "ForUltraplayer",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "./installer-hooks.nsh"
+      }
+    },
     "icon": [
       "icons/icon.ico",
       "icons/icon.png"

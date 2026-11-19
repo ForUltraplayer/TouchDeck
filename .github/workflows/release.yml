@@ -41,8 +41,8 @@ jobs:
       - name: Run Rust unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
-      - name: Build TouchDeck single executable
-        run: npm run tauri build -- --no-bundle
+      - name: Build TouchDeck executable and NSIS installer
+        run: npm run tauri build
 
       - name: Package artifacts and publish GitHub Release
         shell: pwsh
@@ -68,6 +68,11 @@ jobs:
             throw "Built executable not found at $exeSrc"
           }
 
+          $setupSrc = Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          if (-not $setupSrc) {
+            throw "Built installer not found under src-tauri/target/release/bundle/nsis"
+          }
+
           $stage = Join-Path $env:RUNNER_TEMP "release-$tag"
           $portableDir = Join-Path $stage "portable"
           New-Item -ItemType Directory -Path (Join-Path $portableDir "data") -Force | Out-Null
@@ -77,10 +82,13 @@ jobs:
           Copy-Item $exeSrc $exeOut -Force
           Copy-Item $exeSrc (Join-Path $portableDir "TouchDeck.exe") -Force
           Compress-Archive -Path "$portableDir\*" -DestinationPath $zipOut -Force
+          # The in-app updater downloads the plain exe (it skips names containing "setup").
+          $setupOut = Join-Path $stage "TouchDeck-$tag-windows-x64-setup.exe"
+          Copy-Item $setupSrc.FullName $setupOut -Force
 
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $exeOut $zipOut --clobber
+            gh release upload $tag $setupOut $exeOut $zipOut --clobber
           } else {
-            gh release create $tag $exeOut $zipOut --title "TouchDeck $tag" --generate-notes
+            gh release create $tag $setupOut $exeOut $zipOut --title "TouchDeck $tag" --generate-notes
           }
