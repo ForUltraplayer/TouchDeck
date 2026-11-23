@@ -11,11 +11,13 @@ mod win_window;
 
 use config::{
     copy_image_to_assets, get_data_dir, import_config_with_backup, is_portable_mode, load_config,
-    resolve_asset_path, save_config_from_ui, ButtonAction, ButtonItem, DeckConfig,
+    resolve_asset_path, save_config_from_ui, set_autostart_preference, ButtonAction, ButtonItem,
+    DeckConfig,
 };
 use i18n::{detail, t, Text};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Mutex;
 use std::thread;
@@ -399,9 +401,15 @@ fn tick_desktop_visibility(window: tauri::WebviewWindow, always_on_top: bool) ->
 
 #[tauri::command]
 async fn set_autostart_cmd(enabled: bool) -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(move || win_window::set_autostart(enabled))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let actual = win_window::set_autostart(enabled)?;
+        if let Err(e) = set_autostart_preference(actual) {
+            append_startup_log(&format!("save autostart preference failed: {e}"));
+        }
+        Ok(actual)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -615,9 +623,89 @@ async fn import_config_file(app: AppHandle, path: String) -> Result<DeckConfig, 
     .map_err(|e| e.to_string())?
 }
 
+fn append_startup_log(msg: &str) {
+    let dir = get_data_dir().unwrap_or_else(|_| std::env::temp_dir());
+    let path = dir.join("startup.log");
+    // Bound the log size so repeated errors never grow indefinitely.
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 128 * 1024 {
+            let _ = std::fs::write(&path, b"");
+        }
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{secs}] {msg}");
+    }
+}
+
+fn build_tray_icon(app: &AppHandle, menu: &Menu<tauri::Wry>) -> tauri::Result<()> {
+    let mut builder = TrayIconBuilder::new()
+        .menu(menu)
+        .tooltip("TouchDeck")
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => {
+                win_window::set_user_hidden(false);
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.emit("tray-show", ());
+                }
+            }
+            "hide" => {
+                win_window::set_user_hidden(true);
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.emit("tray-hide", ());
+                    let _ = w.hide();
+                }
+            }
+            "settings" => {
+                win_window::set_user_hidden(false);
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                    let _ = w.emit("open-settings", ());
+                }
+            }
+            "quit" => {
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                win_window::set_user_hidden(false);
+                if let Some(w) = tray.app_handle().get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.emit("tray-show", ());
+                }
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app).map(|_| ())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        append_startup_log(&format!("panic: {info}"));
+        prev_hook(info);
+    }));
+
+    let res = tauri::Builder::default()
         // Must stay the first plugin: a second launch hands over to the running
         // instance here and exits before anything else touches config.json.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -634,6 +722,10 @@ pub fn run() {
 
             // Loaded before the tray menu is built: this sets the backend language.
             let startup_cfg = load_config();
+            if let Err(ref e) = startup_cfg {
+                append_startup_log(&format!("startup config load failed: {e}"));
+            }
+            let saved_autostart = startup_cfg.as_ref().ok().and_then(|c| c.autostart);
             let lang = i18n::current();
             let item = |id: &str, text: Text| {
                 MenuItem::with_id(app, id, text.in_lang(lang), true, None::<&str>)
@@ -652,9 +744,19 @@ pub fn run() {
                 lang: Mutex::new(lang),
             });
 
+            // Sync or restore the Startup shortcut off the main UI thread.
+            thread::spawn(move || match win_window::sync_autostart_on_startup(saved_autostart) {
+                Ok(Some(val)) => {
+                    if let Err(e) = set_autostart_preference(val) {
+                        append_startup_log(&format!("autostart backfill failed: {e}"));
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => append_startup_log(&format!("autostart sync failed: {e}")),
+            });
+
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_skip_taskbar(true);
-                win_window::refresh_autostart_if_enabled();
                 if let Ok(cfg) = startup_cfg {
                     if let (Some(x), Some(y)) = (cfg.window.x, cfg.window.y) {
                         let cols = cfg.grid.columns as f64;
@@ -702,53 +804,49 @@ pub fn run() {
                 }
             }
 
-            let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
-                .menu(&menu)
-                .tooltip("TouchDeck")
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        win_window::set_user_hidden(false);
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.emit("tray-show", ());
+            if let Err(e) = build_tray_icon(app.handle(), &menu) {
+                append_startup_log(&format!("initial tray icon build failed: {e}"));
+                let handle = app.handle().clone();
+                let retry_menu = menu.clone();
+                thread::spawn(move || {
+                    // Explorer's notification area may not be ready right after Windows logon.
+                    const DELAYS_MS: [u64; 10] =
+                        [1000, 1500, 2000, 2000, 3000, 3000, 4000, 5000, 5000, 5000];
+                    for (idx, delay) in DELAYS_MS.iter().enumerate() {
+                        thread::sleep(Duration::from_millis(*delay));
+                        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+                        let h = handle.clone();
+                        let m = retry_menu.clone();
+                        if handle
+                            .run_on_main_thread(move || {
+                                let res = build_tray_icon(&h, &m).map_err(|err| err.to_string());
+                                let _ = tx.send(res);
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                        match rx.recv_timeout(Duration::from_secs(5)) {
+                            Ok(Ok(())) => {
+                                append_startup_log(&format!(
+                                    "tray icon created on retry {}",
+                                    idx + 1
+                                ));
+                                return;
+                            }
+                            Ok(Err(err)) => {
+                                if idx + 1 == DELAYS_MS.len() {
+                                    append_startup_log(&format!(
+                                        "tray icon retry {} failed (giving up): {err}",
+                                        idx + 1
+                                    ));
+                                }
+                            }
+                            Err(_) => break,
                         }
                     }
-                    "hide" => {
-                        win_window::set_user_hidden(true);
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.emit("tray-hide", ());
-                            let _ = w.hide();
-                        }
-                    }
-                    "settings" => {
-                        win_window::set_user_hidden(false);
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                            let _ = w.emit("open-settings", ());
-                        }
-                    }
-                    "quit" => {
-                        app.exit(0);
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        win_window::set_user_hidden(false);
-                        if let Some(w) = tray.app_handle().get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.emit("tray-show", ());
-                        }
-                    }
-                })
-                .build(app)?;
+                });
+            }
 
             Ok(())
         })
@@ -787,6 +885,10 @@ pub fn run() {
             check_update,
             apply_update
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running TouchDeck");
+        .run(tauri::generate_context!());
+
+    if let Err(e) = res {
+        append_startup_log(&format!("error while running TouchDeck: {e}"));
+        std::process::exit(1);
+    }
 }

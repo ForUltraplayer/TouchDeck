@@ -188,6 +188,8 @@ pub struct DeckConfig {
     pub auto_check_update: bool,
     #[serde(default)]
     pub language: Option<String>, // "ko" | "en" | "ja"; None = follow Windows
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autostart: Option<bool>,
 }
 
 impl Default for DeckConfig {
@@ -429,6 +431,7 @@ impl Default for DeckConfig {
             discord: DiscordConfig::default(),
             auto_check_update: true,
             language: None,
+            autostart: None,
         }
     }
 }
@@ -535,10 +538,10 @@ fn load_or_recover_config_in(dir: &Path) -> Result<(DeckConfig, Option<String>),
             }
             Err(e) => {
                 tries += 1;
-                if tries >= 3 {
+                if tries >= 6 {
                     return Err(detail(Text::ConfigReadFailed, e));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
         }
     };
@@ -601,9 +604,21 @@ pub fn save_config_from_ui(cfg: &DeckConfig) -> Result<(), String> {
     // would drop the stored Discord tokens.
     let disk = load_config_unlocked()?;
     merge_ui_discord(&mut merged, &disk);
+    // Autostart is managed by its dedicated command, so UI saves never clobber it.
+    merged.autostart = disk.autostart;
     save_config_unlocked(&merged)?;
     i18n::set_current(merged.language.as_deref());
     Ok(())
+}
+
+pub fn set_autostart_preference(enabled: bool) -> Result<(), String> {
+    let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cfg = load_config_unlocked()?;
+    if cfg.autostart == Some(enabled) {
+        return Ok(());
+    }
+    cfg.autostart = Some(enabled);
+    save_config_unlocked(&cfg)
 }
 
 pub fn update_discord_config<F: FnOnce(&mut DiscordConfig)>(f: F) -> Result<DiscordConfig, String> {
@@ -641,6 +656,9 @@ fn import_config_in<F: FnOnce(DeckConfig) -> DeckConfig>(
         && !disk.discord.client_id.is_empty()
     {
         next.discord = disk.discord;
+    }
+    if next.autostart.is_none() {
+        next.autostart = disk.autostart;
     }
     let current = fs::read(dir.join("config.json")).map_err(|e| e.to_string())?;
     write_config_backup(dir, "before-import", &current)
@@ -871,6 +889,31 @@ mod tests {
         assert_eq!(fs::read(&backups[0]).unwrap(), before);
         let (reloaded, _) = load_or_recover_config_in(&dir).unwrap();
         assert_eq!(reloaded.discord.access_token, "acc");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn autostart_is_optional_and_preserved_on_import_when_absent() {
+        let mut json = serde_json::to_value(DeckConfig::default()).unwrap();
+        assert!(json.get("autostart").is_none());
+
+        // Older config without the field loads cleanly.
+        let old: DeckConfig = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(old.autostart, None);
+
+        json["autostart"] = true.into();
+        let enabled: DeckConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(enabled.autostart, Some(true));
+
+        let dir = test_dir("autostart_import");
+        let mut disk = DeckConfig::default();
+        disk.autostart = Some(true);
+        save_config_to_dir(&dir, &disk).unwrap();
+
+        let imported = DeckConfig::default();
+        assert_eq!(imported.autostart, None);
+        let saved = import_config_in(&dir, disk, |_| imported).unwrap();
+        assert_eq!(saved.autostart, Some(true));
         let _ = fs::remove_dir_all(&dir);
     }
 }

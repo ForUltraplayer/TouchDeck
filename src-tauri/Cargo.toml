@@ -1,6 +1,6 @@
 [package]
 name = "touchdeck"
-version = "0.3.1"
+version = "0.3.2"
 description = "Lightweight Windows touchscreen launcher & Stream Deck alternative"
 authors = ["ForUltraplayer"]
 edition = "2021"
@@ -49,6 +49,7 @@ features = [
     "Win32_Networking_WinHttp",
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
+    "Win32_System_Registry",
     "Media_Control",
     "Foundation",
 ]

@@ -137,6 +137,8 @@ export interface DeckConfig {
   autoCheckUpdate?: boolean;
   // null or absent follows the Windows display language
   language?: Language | null;
+  // Managed by the backend autostart command to survive installer upgrades
+  autostart?: boolean | null;
 }
 
 export type Language = "ko" | "en" | "ja";

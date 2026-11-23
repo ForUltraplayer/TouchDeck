@@ -1,23 +1,31 @@
 use crate::win_com::ComGuard;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Once;
 use std::thread;
 use std::time::Duration;
 use windows::core::{w, Interface, HSTRING};
-use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::Win32::Foundation::{ERROR_SUCCESS, HWND, MAX_PATH, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
     MONITOR_DEFAULTTONULL,
 };
-use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER};
-use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoTaskMemFree, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ,
+};
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER,
+    KEY_QUERY_VALUE, KEY_SET_VALUE, REG_BINARY, REG_VALUE_TYPE,
+};
+use windows::Win32::UI::Shell::{
+    FOLDERID_Startup, IShellLinkW, SHGetKnownFolderPath, ShellLink, KF_FLAG_DEFAULT, SLGP_RAWPATH,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, IsIconic,
-    IsWindow, IsWindowVisible, SetWindowLongPtrW, SetWindowLongW, SetWindowPos, ShowWindow,
-    GWLP_HWNDPARENT, GWL_EXSTYLE, GW_HWNDPREV, HWND_NOTOPMOST, HWND_TOPMOST, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
-    WS_EX_NOACTIVATE,
+    FindWindowW, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowLongW,
+    IsIconic, IsWindow, IsWindowVisible, SetWindowLongPtrW, SetWindowLongW, SetWindowPos,
+    ShowWindow, GWLP_HWNDPARENT, GWL_EXSTYLE, GW_HWNDPREV, HWND_NOTOPMOST, HWND_TOPMOST,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SW_SHOWNOACTIVATE, WS_EX_NOACTIVATE,
 };
 
 static DESKTOP_LAYER_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -30,32 +38,174 @@ pub fn set_user_hidden(hidden: bool) {
     USER_HIDDEN.store(hidden, Ordering::SeqCst);
 }
 
-fn startup_shortcut_path() -> Result<PathBuf, String> {
+const STARTUP_SHORTCUT_NAME: &str = "TouchDeck.lnk";
+
+fn startup_dir() -> Result<PathBuf, String> {
+    unsafe {
+        if let Ok(pw) = SHGetKnownFolderPath(&FOLDERID_Startup, KF_FLAG_DEFAULT, None) {
+            let s = pw.to_string().ok();
+            CoTaskMemFree(Some(pw.0 as *const _));
+            if let Some(path) = s.filter(|p| !p.is_empty()) {
+                return Ok(PathBuf::from(path));
+            }
+        }
+    }
     let appdata = std::env::var("APPDATA").map_err(|_| "APPDATA not found".to_string())?;
     Ok(PathBuf::from(appdata)
         .join("Microsoft")
         .join("Windows")
         .join("Start Menu")
         .join("Programs")
-        .join("Startup")
-        .join("TouchDeck.lnk"))
+        .join("Startup"))
+}
+
+fn startup_shortcut_path() -> Result<PathBuf, String> {
+    Ok(startup_dir()?.join(STARTUP_SHORTCUT_NAME))
+}
+
+// Windows Task Manager / Settings records disabled Startup folder items under
+// HKCU\...\Explorer\StartupApproved\StartupFolder as a 12-byte REG_BINARY where
+// an odd first byte (e.g. 0x03, 0x01) means disabled and even (0x02, 0x06) enabled.
+fn is_startup_approved_bytes_disabled(data: &[u8]) -> bool {
+    !data.is_empty() && (data[0] & 1) != 0
+}
+
+pub fn is_startup_approved_disabled() -> bool {
+    unsafe {
+        let mut hkey = HKEY::default();
+        let open_res = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            w!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder"),
+            0,
+            KEY_QUERY_VALUE,
+            &mut hkey,
+        );
+        if open_res != ERROR_SUCCESS {
+            return false;
+        }
+        let mut reg_type = REG_VALUE_TYPE::default();
+        let mut buf = [0u8; 32];
+        let mut len = buf.len() as u32;
+        let query_res = RegQueryValueExW(
+            hkey,
+            w!("TouchDeck.lnk"),
+            None,
+            Some(&mut reg_type),
+            Some(buf.as_mut_ptr()),
+            Some(&mut len),
+        );
+        let _ = RegCloseKey(hkey);
+        query_res == ERROR_SUCCESS
+            && reg_type == REG_BINARY
+            && is_startup_approved_bytes_disabled(&buf[..len as usize])
+    }
+}
+
+fn clear_startup_approved_entry() {
+    unsafe {
+        let mut hkey = HKEY::default();
+        let open_res = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            w!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder"),
+            0,
+            KEY_SET_VALUE,
+            &mut hkey,
+        );
+        if open_res == ERROR_SUCCESS {
+            let _ = RegDeleteValueW(hkey, w!("TouchDeck.lnk"));
+            let _ = RegCloseKey(hkey);
+        }
+    }
+}
+
+fn utf16_buf_to_string(buf: &[u16]) -> String {
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..len])
+}
+
+fn paths_match_windows(a: &str, b: &str) -> bool {
+    let norm = |s: &str| {
+        s.trim()
+            .trim_end_matches(['\\', '/'])
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    };
+    norm(a) == norm(b)
+}
+
+fn read_shortcut_target_and_dir(lnk_path: &Path) -> Option<(String, String)> {
+    let _com = ComGuard::sta();
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        let persist: IPersistFile = link.cast().ok()?;
+        persist
+            .Load(&HSTRING::from(lnk_path.to_string_lossy().as_ref()), STGM_READ)
+            .ok()?;
+
+        let mut target_buf = vec![0u16; MAX_PATH as usize * 2];
+        link.GetPath(&mut target_buf, std::ptr::null_mut(), SLGP_RAWPATH.0 as u32)
+            .ok()?;
+        let target = utf16_buf_to_string(&target_buf);
+
+        let mut wd_buf = vec![0u16; MAX_PATH as usize * 2];
+        link.GetWorkingDirectory(&mut wd_buf).ok()?;
+        let work_dir = utf16_buf_to_string(&wd_buf);
+
+        Some((target, work_dir))
+    }
 }
 
 pub fn is_autostart_enabled() -> bool {
-    startup_shortcut_path().map(|p| p.exists()).unwrap_or(false)
+    startup_shortcut_path()
+        .map(|p| p.exists() && !is_startup_approved_disabled())
+        .unwrap_or(false)
 }
 
-pub fn refresh_autostart_if_enabled() {
-    if cfg!(debug_assertions) || !is_autostart_enabled() {
-        return;
+/// Keeps the Startup shortcut in sync on launch:
+/// - Skips dev/target builds.
+/// - Respects Windows Task Manager's disabled state (`StartupApproved`).
+/// - Rewrites an existing shortcut only when its target or working dir changed.
+/// - Recreates a missing shortcut when `saved_pref == Some(true)` (e.g. after a
+///   manual NSIS upgrade whose uninstall step removed the old shortcut).
+/// Returns `Some(true)` when an existing active shortcut should be backfilled into config.
+pub fn sync_autostart_on_startup(saved_pref: Option<bool>) -> Result<Option<bool>, String> {
+    if cfg!(debug_assertions) {
+        return Ok(None);
     }
-    if let Ok(exe) = std::env::current_exe() {
-        let s = exe.to_string_lossy();
-        if s.contains("\\target\\") || s.contains("/target/") {
-            return;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_str = exe.to_string_lossy();
+    if exe_str.contains("\\target\\") || exe_str.contains("/target/") {
+        return Ok(None);
+    }
+    let exe_dir = exe
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let lnk_path = startup_shortcut_path()?;
+    let disabled_by_os = is_startup_approved_disabled();
+
+    if lnk_path.exists() {
+        if disabled_by_os {
+            return Ok(None);
         }
-        let _ = set_autostart(true);
+        let matches = read_shortcut_target_and_dir(&lnk_path).is_some_and(|(t, wd)| {
+            paths_match_windows(&t, &exe_str) && paths_match_windows(&wd, &exe_dir)
+        });
+        if !matches {
+            set_autostart(true)?;
+        }
+        return Ok(if saved_pref.is_none() {
+            Some(true)
+        } else {
+            None
+        });
     }
+
+    if saved_pref == Some(true) && !disabled_by_os {
+        set_autostart(true)?;
+    }
+    Ok(None)
 }
 
 pub fn set_autostart(enabled: bool) -> Result<bool, String> {
@@ -64,7 +214,12 @@ pub fn set_autostart(enabled: bool) -> Result<bool, String> {
         if lnk_path.exists() {
             std::fs::remove_file(&lnk_path).map_err(|e| e.to_string())?;
         }
+        clear_startup_approved_entry();
         return Ok(false);
+    }
+
+    if let Some(parent) = lnk_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
     let exe_path = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -86,6 +241,8 @@ pub fn set_autostart(enabled: bool) -> Result<bool, String> {
             .Save(&HSTRING::from(lnk_path.to_string_lossy().as_ref()), true)
             .map_err(|e| e.to_string())?;
     }
+    // Clear any prior Task Manager "Disabled" entry so Windows actually launches it.
+    clear_startup_approved_entry();
     Ok(true)
 }
 
@@ -300,6 +457,23 @@ pub fn start_desktop_monitor() {
     });
 }
 
+unsafe fn ensure_progman_owner(hwnd: HWND) {
+    let cur_owner = GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT);
+    if let Ok(progman) = FindWindowW(w!("Progman"), None) {
+        if !progman.0.is_null() {
+            let target = progman.0 as isize;
+            if cur_owner != target {
+                SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, target);
+            }
+            return;
+        }
+    }
+    // If Explorer is restarting and the old Progman handle is gone, detach the dead owner.
+    if cur_owner != 0 && !IsWindow(HWND(cur_owner as *mut _)).as_bool() {
+        SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
+    }
+}
+
 pub fn set_desktop_layer(hwnd_raw: isize, enabled: bool, always_on_top: bool) {
     MAIN_HWND.store(hwnd_raw, Ordering::SeqCst);
     DESKTOP_ALWAYS_ON_TOP.store(always_on_top, Ordering::SeqCst);
@@ -311,11 +485,7 @@ pub fn set_desktop_layer(hwnd_raw: isize, enabled: bool, always_on_top: bool) {
             return;
         }
         if enabled {
-            if let Ok(progman) = FindWindowW(w!("Progman"), None) {
-                if !progman.0.is_null() {
-                    SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, progman.0 as isize);
-                }
-            }
+            ensure_progman_owner(hwnd);
         } else {
             SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
         }
@@ -369,6 +539,9 @@ pub fn tick_desktop_visibility(hwnd_raw: isize, always_on_top: bool) {
         if hwnd.0.is_null() || !IsWindow(hwnd).as_bool() {
             return;
         }
+
+        // Re-attach if Progman was not ready at logon or Explorer restarted.
+        ensure_progman_owner(hwnd);
 
         let mut need_raise = false;
         if IsIconic(hwnd).as_bool() || !IsWindowVisible(hwnd).as_bool() {
@@ -478,5 +651,30 @@ mod tests {
         assert!(res.recentered);
         assert_eq!(res.x, (1920 - 568) / 2);
         assert_eq!(res.y, (1040 - 500) / 2);
+    }
+
+    #[test]
+    fn startup_approved_disabled_detects_odd_flag_bytes() {
+        assert!(!is_startup_approved_bytes_disabled(&[]));
+        assert!(!is_startup_approved_bytes_disabled(&[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+        assert!(!is_startup_approved_bytes_disabled(&[0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+        assert!(is_startup_approved_bytes_disabled(&[0x03, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8]));
+        assert!(is_startup_approved_bytes_disabled(&[0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn paths_match_windows_ignores_case_slashes_and_trailing_sep() {
+        assert!(paths_match_windows(
+            r"C:\Users\Me\AppData\Local\TouchDeck\touchdeck.exe",
+            r"c:/users/me/appdata/local/touchdeck/TouchDeck.exe"
+        ));
+        assert!(paths_match_windows(
+            r"C:\Program Files\TouchDeck\",
+            r"C:\Program Files\TouchDeck"
+        ));
+        assert!(!paths_match_windows(
+            r"C:\TouchDeck\touchdeck.exe",
+            r"D:\TouchDeck\touchdeck.exe"
+        ));
     }
 }
